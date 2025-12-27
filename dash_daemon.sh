@@ -6,9 +6,9 @@ INTERVAL=5
 MAX_HISTORY=120  # 120 samples * 5 sec = 10 minutes of history
 JSON_OUT="/www/data.json"
 FETCH_LOG="/tmp/fetch_history.log"
+PING_LOG="/tmp/ping_history.log"
 THRU_LOG="/tmp/thru_history.log"
 IW_CACHE="/tmp/iw_stats_cache"
-PING_RRD="/tmp/rrd/air-316/ping/ping-8.8.8.8.rrd"
 PID_FILE="/tmp/dash_daemon.pid"
 AVAIL_LOG="/tmp/avail_history.log"
 LAST_SUCCESS_FILE="/tmp/last_success.txt"
@@ -18,6 +18,7 @@ echo $$ > "$PID_FILE"
 
 # Initialize logs
 [ -f "$FETCH_LOG" ] || touch "$FETCH_LOG"
+[ -f "$PING_LOG" ] || touch "$PING_LOG"
 [ -f "$THRU_LOG" ] || touch "$THRU_LOG"
 [ -f "$AVAIL_LOG" ] || touch "$AVAIL_LOG"
 [ -f "$LAST_SUCCESS_FILE" ] || echo "0" > "$LAST_SUCCESS_FILE"
@@ -55,19 +56,19 @@ collect_data() {
     FETCH_HIST=$(awk 'NF && /^-?[0-9]+$/ {printf "%s%s", sep, $1; sep=","}' "$FETCH_LOG")
     [ -z "$FETCH_HIST" ] && FETCH_HIST="0"
 
-    # --- Latency from RRD ---
-    LATENCY_DATA=""
-    if [ -f "$PING_RRD" ]; then
-        LATENCY_DATA=$(rrdtool fetch "$PING_RRD" AVERAGE -s -1800 2>/dev/null | \
-            awk -F'[: ]+' 'NF>=2 && $1 ~ /^[0-9]+$/ && $2 ~ /^[0-9.e+-]+$/ && $2 !~ /nan/ {
-                ts = $1; val = $2 + 0
-                printf "%s{\"t\":%s,\"v\":%.1f}", sep, ts, val; sep=","
-            }')
-    fi
-    [ -z "$LATENCY_DATA" ] && LATENCY_DATA='{"t":0,"v":0}'
-
+    # --- Ping latency ---
     PING_MS=$(ping -c 1 -W 2 8.8.8.8 2>/dev/null | grep -oE 'time=[0-9.]+' | cut -d= -f2)
     [ -z "$PING_MS" ] && PING_MS=-1
+
+    # Store ping history (convert to int, -1 for failure)
+    if [ "$PING_MS" = "-1" ]; then
+        echo "-1" >> "$PING_LOG"
+    else
+        printf "%.0f\n" "$PING_MS" >> "$PING_LOG"
+    fi
+    tail -n $MAX_HISTORY "$PING_LOG" > "${PING_LOG}.tmp" && mv "${PING_LOG}.tmp" "$PING_LOG"
+    PING_HIST=$(awk 'NF && /^-?[0-9]+$/ {printf "%s%s", sep, $1; sep=","}' "$PING_LOG")
+    [ -z "$PING_HIST" ] && PING_HIST="0"
 
     # --- Throughput from iw ---
     TMP_FILE="/tmp/iw_stats_current"
@@ -160,7 +161,7 @@ collect_data() {
   "interval": $INTERVAL,
   "uplink_ssid": "$UPLINK_SSID",
   "web": {"code": $WEB_CODE, "ms": $WEB_MS, "history": [$FETCH_HIST]},
-  "ping": {"current": $PING_MS, "history": [$LATENCY_DATA]},
+  "ping": {"current": $PING_MS, "history": [$PING_HIST]},
   "throughput": {
     "rx_kbps": $RX_KBPS, "tx_kbps": $TX_KBPS,
     "rx_peak": $RX_PEAK, "tx_peak": $TX_PEAK,

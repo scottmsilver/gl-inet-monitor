@@ -498,9 +498,7 @@ async function fetchData() {
     }, formatMs, 'web');
 
     // Ping
-    if (data.ping.history && data.ping.history.length) {
-      state.pingHistory = data.ping.history.map(p => p.v).filter(v => v > 0);
-    }
+    state.pingHistory = (data.ping.history || []).filter(v => v > 0);
     updateStats('ping', {
       p99: percentile(state.pingHistory, 99),
       avg: trailingAvg(state.pingHistory, 12),
