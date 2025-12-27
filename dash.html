@@ -1,0 +1,694 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Beryl AX Monitor</title>
+<style>
+:root {
+  --bg: #1a1a2e;
+  --card: rgba(255,255,255,0.08);
+  --card-border: rgba(255,255,255,0.12);
+  --text: #ffffff;
+  --text-dim: rgba(255,255,255,0.6);
+  --green: #4ade80;
+  --yellow: #fbbf24;
+  --red: #f87171;
+  --blue: #60a5fa;
+  --purple: #a78bfa;
+}
+* { margin:0; padding:0; box-sizing:border-box; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Display', sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  min-height: 100vh;
+  padding: 20px;
+}
+.grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));
+  gap: 20px;
+  max-width: 1100px;
+  margin: 0 auto;
+}
+.card {
+  background: var(--card);
+  border: 1px solid var(--card-border);
+  border-radius: 12px;
+  padding: 6px;
+  backdrop-filter: blur(10px);
+  position: relative;
+}
+.stats-overlay {
+  position: absolute;
+  bottom: 4px;
+  right: 6px;
+  z-index: 5;
+  background: rgba(26, 26, 46, 0.85);
+  border-radius: 4px;
+  padding: 2px 4px;
+  font-size: 10px;
+  font-weight: 500;
+  font-family: 'SF Mono', Monaco, 'Courier New', monospace;
+  display: flex;
+  gap: 6px;
+  transition: transform 0.2s, opacity 0.2s;
+}
+.stats-overlay.hidden {
+  transform: translateX(calc(100% + 6px));
+}
+.stats-toggle {
+  position: absolute;
+  bottom: 6px;
+  z-index: 6;
+  width: 16px;
+  height: 16px;
+  background: rgba(255, 255, 255, 0.15);
+  border-radius: 3px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 9px;
+  color: var(--text);
+  transition: background 0.2s, left 0.2s, right 0.2s;
+  right: 6px;
+}
+.stats-toggle:hover { background: rgba(255, 255, 255, 0.3); }
+.stat-val { min-width: 3.5em; text-align: right; display: inline-block; cursor: default; }
+.stat-label { display: none; font-size: 8px; color: var(--text-dim); margin-left: 1px; }
+.stat-val:hover .stat-label { display: inline; }
+.thru-stats { flex-direction: column; gap: 0; }
+.stat-row { display: flex; align-items: center; gap: 4px; }
+.stat-row .legend-dot { flex-shrink: 0; }
+.val-good { color: var(--green); }
+.val-warn { color: var(--yellow); }
+.val-bad { color: var(--red); }
+.graph-container {
+  position: relative;
+  height: 80px;
+}
+.graph-container canvas {
+  width: 100%;
+  height: 100%;
+  cursor: crosshair;
+}
+.hover-tooltip {
+  position: absolute;
+  background: rgba(0,0,0,0.85);
+  border: 1px solid var(--card-border);
+  border-radius: 6px;
+  padding: 6px 10px;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.15s;
+  z-index: 10;
+  white-space: nowrap;
+}
+.hover-tooltip.visible { opacity: 1; }
+.status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  display: inline-block;
+}
+.status-good { background: var(--green); box-shadow: 0 0 8px var(--green); }
+.status-warn { background: var(--yellow); box-shadow: 0 0 8px var(--yellow); }
+.status-bad { background: var(--red); box-shadow: 0 0 8px var(--red); }
+.legend-dot { width: 6px; height: 6px; border-radius: 50%; display: inline-block; margin-right: 2px; }
+.legend-dl { background: var(--blue); }
+.legend-ul { background: var(--purple); }
+.header {
+  text-align: center;
+  margin-bottom: 16px;
+  font-size: 16px;
+  font-weight: 500;
+}
+.internet-status {
+  display: inline-block;
+  padding: 3px 10px;
+  border-radius: 12px;
+  font-size: 12px;
+  font-weight: 600;
+}
+.dim { color: var(--text-dim); }
+.status-online { background: rgba(74, 222, 128, 0.2); color: var(--green); }
+.status-degraded { background: rgba(251, 191, 36, 0.2); color: var(--yellow); }
+.status-offline { background: rgba(248, 113, 113, 0.2); color: var(--red); }
+.header p { color: var(--text-dim); font-size: 14px; }
+.card-label {
+  position: absolute;
+  bottom: 4px;
+  left: 6px;
+  font-size: 8px;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+}
+.footer {
+  text-align: center;
+  margin-top: 20px;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+</style>
+</head>
+<body>
+<div class="header">
+  <span id="uplink-ssid">Loading...</span>
+  <span id="internet-status" class="internet-status">Checking...</span>
+  <span class="dim">• <span id="last-update">--</span></span>
+</div>
+<div class="grid">
+  <div class="card">
+    <div class="stats-toggle" onclick="toggleStats(this)">◀</div>
+    <div class="stats-overlay">
+      <span class="stat-val" id="web-p99">--<span class="stat-label">p99</span></span>
+      <span class="stat-val" id="web-1m">--<span class="stat-label">1m</span></span>
+      <span class="stat-val" id="web-now">--<span class="stat-label">now</span></span>
+    </div>
+    <div class="graph-container">
+      <canvas id="web-graph"></canvas>
+      <div class="hover-tooltip" id="web-tooltip"></div>
+    </div>
+    <div class="card-label">HTTP 204 to Google</div>
+  </div>
+
+  <div class="card">
+    <div class="stats-toggle" onclick="toggleStats(this)">◀</div>
+    <div class="stats-overlay">
+      <span class="stat-val" id="ping-p99">--<span class="stat-label">p99</span></span>
+      <span class="stat-val" id="ping-1m">--<span class="stat-label">1m</span></span>
+      <span class="stat-val" id="ping-now">--<span class="stat-label">now</span></span>
+    </div>
+    <div class="graph-container">
+      <canvas id="ping-graph"></canvas>
+      <div class="hover-tooltip" id="ping-tooltip"></div>
+    </div>
+    <div class="card-label">ICMP to 8.8.8.8</div>
+  </div>
+
+  <div class="card">
+    <div class="stats-toggle" onclick="toggleStats(this)">◀</div>
+    <div class="stats-overlay thru-stats">
+      <span class="stat-row"><span class="legend-dot legend-dl"></span><span class="stat-val" id="dl-p99">--<span class="stat-label">p99</span></span><span class="stat-val" id="dl-1m">--<span class="stat-label">1m</span></span><span class="stat-val" id="dl-now">--<span class="stat-label">now</span></span></span>
+      <span class="stat-row"><span class="legend-dot legend-ul"></span><span class="stat-val" id="ul-p99">--<span class="stat-label">p99</span></span><span class="stat-val" id="ul-1m">--<span class="stat-label">1m</span></span><span class="stat-val" id="ul-now">--<span class="stat-label">now</span></span></span>
+    </div>
+    <div class="graph-container">
+      <canvas id="thru-graph"></canvas>
+      <div class="hover-tooltip" id="thru-tooltip"></div>
+    </div>
+    <div class="card-label">WiFi Station Bytes</div>
+  </div>
+
+  <div class="card">
+    <div class="stats-toggle" onclick="toggleStats(this)">◀</div>
+    <div class="stats-overlay">
+      <span class="stat-val" id="avail-pct">--<span class="stat-label">10m</span></span>
+      <span class="stat-val" id="avail-last">--<span class="stat-label">last ok</span></span>
+    </div>
+    <div class="graph-container">
+      <canvas id="avail-graph"></canvas>
+      <div class="hover-tooltip" id="avail-tooltip"></div>
+    </div>
+    <div class="card-label">Availability</div>
+  </div>
+</div>
+
+<script>
+const colors = {
+  good: 'rgba(74, 222, 128, 1)',
+  warn: 'rgba(251, 191, 36, 1)',
+  bad: 'rgba(248, 113, 113, 1)',
+  blue: 'rgba(96, 165, 250, 1)',
+  purple: 'rgba(167, 139, 250, 1)'
+};
+
+const thresholds = {
+  web: { good: 100, warn: 300 },      // ms
+  ping: { good: 30, warn: 80 },       // ms
+  throughput: { good: 5000, warn: 1000 } // kbps (inverted - higher is better)
+};
+
+const state = {
+  webHistory: [],
+  pingHistory: [],
+  txHistory: [],
+  rxHistory: [],
+  availHistory: [],
+  lastSuccess: 0,
+  graphMeta: {},
+  currentTs: 0,
+  interval: 5
+};
+
+function percentile(arr, p) {
+  if (!arr.length) return 0;
+  const sorted = [...arr].filter(v => v > 0).sort((a, b) => a - b);
+  if (!sorted.length) return 0;
+  const idx = Math.ceil(sorted.length * p / 100) - 1;
+  return sorted[Math.max(0, idx)];
+}
+
+function trailingAvg(arr, samples) {
+  // Get last N samples, filter positive values, calculate average
+  const slice = arr.slice(-samples).filter(v => v > 0);
+  if (!slice.length) return 0;
+  return slice.reduce((a, b) => a + b, 0) / slice.length;
+}
+
+function getColor(type, value) {
+  if (value < 0) return colors.bad;
+  const t = thresholds[type];
+  if (type === 'throughput') {
+    // Inverted: higher is better
+    return value >= t.good ? colors.good : value >= t.warn ? colors.warn : colors.bad;
+  }
+  return value <= t.good ? colors.good : value <= t.warn ? colors.warn : colors.bad;
+}
+
+function getColorClass(type, value) {
+  if (value < 0) return 'val-bad';
+  const t = thresholds[type];
+  if (type === 'throughput') {
+    return value >= t.good ? 'val-good' : value >= t.warn ? 'val-warn' : 'val-bad';
+  }
+  return value <= t.good ? 'val-good' : value <= t.warn ? 'val-warn' : 'val-bad';
+}
+
+function formatMs(v) {
+  return v >= 0 ? v.toFixed(0) + ' ms' : 'ERR';
+}
+
+function formatSpeed(kbps) {
+  if (kbps >= 10000) return (kbps / 1000).toFixed(0) + ' Mbps';
+  if (kbps >= 1000) return (kbps / 1000).toFixed(1) + ' Mbps';
+  return kbps.toFixed(0) + ' Kbps';
+}
+
+function formatSpeedAligned(kbps) {
+  // Always show as X.X Mbps with consistent width for alignment
+  const mbps = kbps / 1000;
+  const num = mbps.toFixed(1).padStart(5);
+  return num + ' M';
+}
+
+function setStat(id, value, formatFn, type) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  const label = el.querySelector('.stat-label');
+  const labelText = label ? label.textContent : '';
+  el.innerHTML = formatFn(value) + (labelText ? `<span class="stat-label">${labelText}</span>` : '');
+  el.className = 'stat-val' + (type ? ' ' + getColorClass(type, value) : '');
+}
+
+function updateStats(prefix, values, formatFn, type) {
+  setStat(prefix + '-p99', values.p99, formatFn, type);
+  setStat(prefix + '-1m', values.avg, formatFn, type);
+  setStat(prefix + '-now', values.now, formatFn, type);
+}
+
+function drawGraph(canvasId, datasets, options = {}) {
+  const canvas = document.getElementById(canvasId);
+  const ctx = canvas.getContext('2d');
+  const dpr = window.devicePixelRatio || 1;
+  const rect = canvas.getBoundingClientRect();
+  canvas.width = rect.width * dpr;
+  canvas.height = rect.height * dpr;
+  ctx.scale(dpr, dpr);
+
+  const w = rect.width, h = rect.height;
+  const pad = { top: 4, right: 6, bottom: 14, left: 26 };
+  const gw = w - pad.left - pad.right, gh = h - pad.top - pad.bottom;
+
+  ctx.clearRect(0, 0, w, h);
+
+  let maxVal = 0;
+  datasets.forEach(ds => ds.data.forEach(v => { if (v > maxVal) maxVal = v; }));
+  if (maxVal === 0) maxVal = 100;
+  maxVal *= 1.15;
+
+  state.graphMeta[canvasId] = { pad, gw, gh, maxVal, datasets, options, w, h };
+
+  // Grid lines
+  ctx.strokeStyle = 'rgba(255,255,255,0.08)';
+  ctx.lineWidth = 1;
+  for (let i = 0; i <= 4; i++) {
+    const y = pad.top + (gh * i / 4);
+    ctx.beginPath(); ctx.moveTo(pad.left, y); ctx.lineTo(w - pad.right, y); ctx.stroke();
+  }
+
+  // Y-axis labels
+  ctx.fillStyle = 'rgba(255,255,255,0.4)';
+  ctx.font = '9px -apple-system, sans-serif';
+  ctx.textAlign = 'right';
+  for (let i = 0; i <= 4; i++) {
+    const y = pad.top + (gh * i / 4);
+    const val = maxVal * (1 - i / 4);
+    let label = options.unit === 'kbps'
+      ? (val >= 1000 ? (val/1000).toFixed(0) + 'M' : val.toFixed(0) + 'K')
+      : val.toFixed(0);
+    ctx.fillText(label, pad.left - 2, y + 3);
+  }
+
+  // Draw datasets with color-coded segments
+  datasets.forEach(ds => {
+    if (ds.data.length < 2) return;
+
+    const step = gw / (ds.data.length - 1);
+    const getY = (v) => pad.top + gh - (Math.max(0, v) / maxVal * gh);
+
+    ctx.lineWidth = 2;
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+
+    // Draw segments with individual colors
+    for (let i = 1; i < ds.data.length; i++) {
+      const v0 = ds.data[i-1], v1 = ds.data[i];
+      const x0 = pad.left + ((i-1) * step);
+      const x1 = pad.left + (i * step);
+      const y0 = getY(v0), y1 = getY(v1);
+
+      // Use the current value's color for the segment
+      const segmentColor = ds.colorFn ? ds.colorFn(v1) : ds.color;
+
+      ctx.strokeStyle = segmentColor;
+      ctx.beginPath();
+      ctx.moveTo(x0, y0);
+      ctx.lineTo(x1, y1);
+      ctx.stroke();
+    }
+
+    // Fill area under curve (use single color with transparency)
+    if (ds.fill) {
+      ctx.beginPath();
+      ctx.moveTo(pad.left, getY(ds.data[0]));
+      ds.data.forEach((v, i) => {
+        ctx.lineTo(pad.left + (i * step), getY(v));
+      });
+      ctx.lineTo(pad.left + (ds.data.length - 1) * step, pad.top + gh);
+      ctx.lineTo(pad.left, pad.top + gh);
+      ctx.closePath();
+      ctx.fillStyle = (ds.fillColor || ds.color).replace('1)', '0.08)');
+      ctx.fill();
+    }
+  });
+}
+
+function setupHover(canvasId, tooltipId, formatFn, colorType) {
+  const canvas = document.getElementById(canvasId);
+  const tooltip = document.getElementById(tooltipId);
+
+  canvas.addEventListener('mousemove', (e) => {
+    const meta = state.graphMeta[canvasId];
+    if (!meta || !meta.datasets.length) return;
+
+    const rect = canvas.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    const y = e.clientY - rect.top;
+
+    if (x < meta.pad.left || x > meta.w - meta.pad.right) {
+      tooltip.classList.remove('visible');
+      return;
+    }
+
+    const relX = x - meta.pad.left;
+    const dataLen = meta.datasets[0].data.length;
+    const idx = Math.round(relX / meta.gw * (dataLen - 1));
+
+    if (idx < 0 || idx >= dataLen) {
+      tooltip.classList.remove('visible');
+      return;
+    }
+
+    // Calculate time for this data point
+    const samplesAgo = dataLen - 1 - idx;
+    const pointTs = state.currentTs - (samplesAgo * state.interval);
+    const timeStr = new Date(pointTs * 1000).toLocaleTimeString();
+
+    let content = [`<span style="color:var(--text-dim)">${timeStr}</span>`];
+    meta.datasets.forEach(ds => {
+      const val = ds.data[idx];
+      const color = ds.colorFn ? ds.colorFn(val) : ds.color;
+      const label = ds.label || '';
+      const text = label ? `${label}: ${formatFn(val)}` : formatFn(val);
+      content.push(`<span style="color:${color}">${text}</span>`);
+    });
+
+    tooltip.innerHTML = content.join('<br>');
+    tooltip.classList.add('visible');
+
+    const tooltipRect = tooltip.getBoundingClientRect();
+    let left = x + 10;
+    if (left + tooltipRect.width > meta.w) left = x - tooltipRect.width - 10;
+    tooltip.style.left = left + 'px';
+    tooltip.style.top = Math.max(0, y - 10) + 'px';
+
+    // Redraw with hover line
+    drawGraph(canvasId, meta.datasets, meta.options);
+
+    const ctx = canvas.getContext('2d');
+    ctx.save();
+    ctx.strokeStyle = 'rgba(255,255,255,0.4)';
+    ctx.lineWidth = 1;
+    ctx.setLineDash([3, 3]);
+    ctx.beginPath();
+    const lineX = meta.pad.left + (idx / (dataLen - 1)) * meta.gw;
+    ctx.moveTo(lineX, meta.pad.top);
+    ctx.lineTo(lineX, meta.pad.top + meta.gh);
+    ctx.stroke();
+
+    meta.datasets.forEach(ds => {
+      const val = ds.data[idx];
+      const dotY = meta.pad.top + meta.gh - (Math.max(0, val) / meta.maxVal * meta.gh);
+      const color = ds.colorFn ? ds.colorFn(val) : ds.color;
+      ctx.beginPath();
+      ctx.arc(lineX, dotY, 4, 0, Math.PI * 2);
+      ctx.fillStyle = color;
+      ctx.fill();
+      ctx.strokeStyle = '#fff';
+      ctx.lineWidth = 1;
+      ctx.setLineDash([]);
+      ctx.stroke();
+    });
+    ctx.restore();
+  });
+
+  canvas.addEventListener('mouseleave', () => {
+    tooltip.classList.remove('visible');
+    const meta = state.graphMeta[canvasId];
+    if (meta) drawGraph(canvasId, meta.datasets, meta.options);
+  });
+}
+
+async function fetchData() {
+  try {
+    const resp = await fetch('/data.json?' + Date.now());
+    const data = await resp.json();
+
+    // Web Verify
+    state.webHistory = data.web.history.filter(v => v > 0);
+    updateStats('web', {
+      p99: percentile(state.webHistory, 99),
+      avg: trailingAvg(state.webHistory, 12),
+      now: data.web.ms
+    }, formatMs, 'web');
+
+    // Ping
+    if (data.ping.history && data.ping.history.length) {
+      state.pingHistory = data.ping.history.map(p => p.v).filter(v => v > 0);
+    }
+    updateStats('ping', {
+      p99: percentile(state.pingHistory, 99),
+      avg: trailingAvg(state.pingHistory, 12),
+      now: data.ping.current
+    }, formatMs, 'ping');
+
+    // Throughput
+    state.txHistory = data.throughput.tx_history || [];
+    state.rxHistory = data.throughput.rx_history || [];
+    updateStats('dl', {
+      p99: percentile(state.txHistory, 99),
+      avg: trailingAvg(state.txHistory, 12),
+      now: data.throughput.tx_kbps
+    }, formatSpeedAligned, null);
+    updateStats('ul', {
+      p99: percentile(state.rxHistory, 99),
+      avg: trailingAvg(state.rxHistory, 12),
+      now: data.throughput.rx_kbps
+    }, formatSpeedAligned, null);
+
+    // Update header and state
+    state.currentTs = data.ts;
+    state.interval = data.interval || 5;
+    document.getElementById('uplink-ssid').textContent = data.uplink_ssid || 'Beryl AX Monitor';
+    document.getElementById('last-update').textContent = new Date(data.ts * 1000).toLocaleTimeString();
+
+    // Determine internet status
+    const statusEl = document.getElementById('internet-status');
+    const webOk = data.web.code === 204 && data.web.ms > 0;
+    const pingOk = data.ping.current > 0;
+    const webSlow = data.web.ms > 300;
+    const pingSlow = data.ping.current > 80;
+
+    // Check recent history for failures (last 12 samples = 1 min)
+    const recentWeb = data.web.history.slice(-12);
+    const webFailures = recentWeb.filter(v => v < 0).length;
+    const webFailRate = recentWeb.length ? webFailures / recentWeb.length : 0;
+
+    if (!webOk && !pingOk) {
+      statusEl.textContent = 'Offline';
+      statusEl.className = 'internet-status status-offline';
+    } else if (!webOk || webFailRate > 0.3 || (webSlow && pingSlow)) {
+      statusEl.textContent = 'Degraded';
+      statusEl.className = 'internet-status status-degraded';
+    } else {
+      statusEl.textContent = 'Online';
+      statusEl.className = 'internet-status status-online';
+    }
+
+    // Draw graphs with color-coded segments
+    drawGraph('web-graph', [{
+      data: state.webHistory,
+      colorFn: (v) => getColor('web', v),
+      fill: true,
+      fillColor: colors.good
+    }], { unit: 'ms' });
+
+    drawGraph('ping-graph', [{
+      data: state.pingHistory,
+      colorFn: (v) => getColor('ping', v),
+      fill: true,
+      fillColor: colors.good
+    }], { unit: 'ms' });
+
+    drawGraph('thru-graph', [
+      { data: state.txHistory, color: colors.blue, fill: true, label: 'DL' },
+      { data: state.rxHistory, color: colors.purple, fill: false, label: 'UL' }
+    ], { unit: 'kbps' });
+
+    // Availability
+    if (data.avail) {
+      state.availHistory = data.avail.history || [];
+      state.lastSuccess = data.avail.last_success || 0;
+
+      // Calculate uptime percentage over history
+      const totalSamples = state.availHistory.length;
+      const upSamples = state.availHistory.filter(v => v === 1).length;
+      const uptimePct = totalSamples ? Math.round(upSamples / totalSamples * 100) : 100;
+
+      // Format last success as relative time
+      const secAgo = data.ts - state.lastSuccess;
+      let lastOkText;
+      if (secAgo < 10) lastOkText = 'now';
+      else if (secAgo < 60) lastOkText = secAgo + 's ago';
+      else if (secAgo < 3600) lastOkText = Math.floor(secAgo / 60) + 'm ago';
+      else lastOkText = Math.floor(secAgo / 3600) + 'h ago';
+
+      const pctEl = document.getElementById('avail-pct');
+      const lastEl = document.getElementById('avail-last');
+      pctEl.innerHTML = uptimePct + '%<span class="stat-label">10m</span>';
+      pctEl.className = 'stat-val ' + (uptimePct >= 99 ? 'val-good' : uptimePct >= 90 ? 'val-warn' : 'val-bad');
+      lastEl.innerHTML = lastOkText + '<span class="stat-label">last ok</span>';
+      lastEl.className = 'stat-val ' + (secAgo < 10 ? 'val-good' : secAgo < 60 ? 'val-warn' : 'val-bad');
+
+      drawAvailGraph('avail-graph', state.availHistory);
+    }
+
+  } catch (err) {
+    console.error('Fetch error:', err);
+  }
+}
+
+// Initialize
+fetchData();
+setInterval(fetchData, 5000);
+
+setupHover('web-graph', 'web-tooltip', formatMs);
+setupHover('ping-graph', 'ping-tooltip', formatMs);
+setupHover('thru-graph', 'thru-tooltip', formatSpeed);
+setupAvailHover('avail-graph', 'avail-tooltip');
+
+window.addEventListener('resize', fetchData);
+
+function toggleStats(btn) {
+  const overlay = btn.nextElementSibling;
+  const isHidden = overlay.classList.toggle('hidden');
+  btn.textContent = isHidden ? '◀' : '▶';
+}
+
+function drawAvailGraph(canvasId, data) {
+  const canvas = document.getElementById(canvasId);
+  const ctx = canvas.getContext('2d');
+  const dpr = window.devicePixelRatio || 1;
+  const rect = canvas.getBoundingClientRect();
+  canvas.width = rect.width * dpr;
+  canvas.height = rect.height * dpr;
+  ctx.scale(dpr, dpr);
+
+  const w = rect.width, h = rect.height;
+  const pad = { top: 4, right: 6, bottom: 14, left: 6 };
+  const gw = w - pad.left - pad.right, gh = h - pad.top - pad.bottom;
+
+  ctx.clearRect(0, 0, w, h);
+
+  if (!data.length) return;
+
+  const barW = gw / data.length;
+  data.forEach((v, i) => {
+    const x = pad.left + i * barW;
+    ctx.fillStyle = v === 1 ? colors.good : colors.bad;
+    ctx.fillRect(x, pad.top, barW - 1, gh);
+  });
+
+  state.graphMeta[canvasId] = { pad, gw, gh, data, w, h };
+}
+
+function setupAvailHover(canvasId, tooltipId) {
+  const canvas = document.getElementById(canvasId);
+  const tooltip = document.getElementById(tooltipId);
+
+  canvas.addEventListener('mousemove', (e) => {
+    const meta = state.graphMeta[canvasId];
+    if (!meta || !meta.data.length) return;
+
+    const rect = canvas.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+
+    if (x < meta.pad.left || x > meta.w - meta.pad.right) {
+      tooltip.classList.remove('visible');
+      return;
+    }
+
+    const relX = x - meta.pad.left;
+    const idx = Math.floor(relX / meta.gw * meta.data.length);
+    if (idx < 0 || idx >= meta.data.length) {
+      tooltip.classList.remove('visible');
+      return;
+    }
+
+    const samplesAgo = meta.data.length - 1 - idx;
+    const pointTs = state.currentTs - (samplesAgo * state.interval);
+    const timeStr = new Date(pointTs * 1000).toLocaleTimeString();
+    const status = meta.data[idx] === 1 ? 'OK' : 'FAIL';
+    const color = meta.data[idx] === 1 ? colors.good : colors.bad;
+
+    tooltip.innerHTML = `<span style="color:var(--text-dim)">${timeStr}</span><br><span style="color:${color}">${status}</span>`;
+    tooltip.classList.add('visible');
+
+    let left = x + 10;
+    if (left + 60 > meta.w) left = x - 70;
+    tooltip.style.left = left + 'px';
+    tooltip.style.top = '10px';
+  });
+
+  canvas.addEventListener('mouseleave', () => {
+    tooltip.classList.remove('visible');
+  });
+}
+</script>
+</body>
+</html>

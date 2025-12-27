@@ -1,0 +1,13 @@
+# Local development
+*.bak
+*.tmp
+.DS_Store
+
+# Editor
+*.swp
+*.swo
+*~
+
+# Sensitive
+*.pem
+*.key
