@@ -1,0 +1,962 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Beryl Dashboard - Compact</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: #1a1a2e;
+      color: #eee;
+      padding: 16px;
+      min-height: 100vh;
+    }
+
+    .stacked-layout {
+      background: #252542;
+      border-radius: 8px;
+      overflow: hidden;
+      max-width: 420px;
+      position: relative;
+    }
+    .stacked-header {
+      display: flex;
+      align-items: center;
+      gap: 2px;
+      padding: 10px 14px;
+      border-bottom: 1px solid rgba(255,255,255,0.1);
+      font-size: 13px;
+    }
+    .stacked-header .status-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+    }
+    .stacked-header .status-text { font-weight: 600; }
+    .stacked-header .ssid {
+      color: #666;
+      font-size: 11px;
+      margin-left: 8px;
+      max-width: 100px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .stacked-header .last-update {
+      color: #555;
+      font-size: 10px;
+      margin-left: 6px;
+    }
+    .stacked-header .header-spacer {
+      flex-grow: 1;
+    }
+    .stacked-header .col-headers {
+      display: flex;
+      width: 132px;
+      flex-shrink: 0;
+      margin-left: -8px;
+    }
+    .stacked-header .col-headers span {
+      width: 44px;
+      text-align: right;
+      font-size: 10px;
+      color: #666;
+      text-transform: uppercase;
+    }
+    .stacked-header .hover-time {
+      color: #a78bfa;
+      font-size: 11px;
+      font-family: 'SF Mono', Monaco, 'Courier New', monospace;
+      max-width: 0;
+      overflow: hidden;
+      opacity: 0;
+      transition: max-width 0.15s, opacity 0.15s;
+      text-align: right;
+      white-space: nowrap;
+    }
+    .stacked-header .hover-time.visible {
+      max-width: 70px;
+      opacity: 1;
+    }
+
+    .stacked-row {
+      display: flex;
+      align-items: center;
+      padding: 6px 14px;
+      gap: 0;
+      cursor: pointer;
+      transition: background 0.15s;
+      border-bottom: 1px solid rgba(255,255,255,0.05);
+      height: 36px;
+    }
+    .stacked-row:last-child { border-bottom: none; }
+    .stacked-row:hover { background: rgba(255,255,255,0.05); }
+
+    .stacked-row .label {
+      font-size: 11px;
+      color: #888;
+      text-transform: uppercase;
+      width: 28px;
+      flex-shrink: 0;
+      margin-right: 4px;
+    }
+    .spark-wrap {
+      position: relative;
+      flex-grow: 1;
+      flex-shrink: 0;
+      width: 80px;
+      height: 20px;
+    }
+    .spark-wrap .sparkline {
+      width: 100%;
+      height: 100%;
+    }
+    .spark-wrap .y-max {
+      position: absolute;
+      top: -1px;
+      left: 2px;
+      font-size: 8px;
+      color: rgba(255,255,255,0.6);
+      font-family: 'SF Mono', Monaco, 'Courier New', monospace;
+      pointer-events: none;
+    }
+    .spark-wrap .hover-line, .detail-wrap .hover-line {
+      position: absolute;
+      top: 0;
+      width: 1px;
+      height: 100%;
+      background: rgba(255,255,255,0.5);
+      pointer-events: none;
+      display: none;
+    }
+
+    /* Values container */
+    .stacked-row .values {
+      display: flex;
+      font-family: 'SF Mono', Monaco, 'Courier New', monospace;
+      font-size: 12px;
+      width: 132px;
+      flex-shrink: 0;
+      margin-left: -8px;
+    }
+    .stacked-row .values .col {
+      width: 44px;
+      text-align: right;
+    }
+
+    /* Hover value - appears during hover */
+    .hover-val {
+      font-family: 'SF Mono', Monaco, 'Courier New', monospace;
+      font-size: 11px;
+      color: #a78bfa;
+      max-width: 0;
+      overflow: hidden;
+      text-align: right;
+      flex-shrink: 0;
+      opacity: 0;
+      white-space: nowrap;
+      margin-left: 0;
+      transition: max-width 0.15s, opacity 0.15s, margin-left 0.15s;
+    }
+    .hover-val.visible { max-width: 50px; opacity: 1; margin-left: 6px; }
+
+    /* Throughput row */
+    .thru-values {
+      display: flex;
+      flex-direction: column;
+      font-family: 'SF Mono', Monaco, 'Courier New', monospace;
+      font-size: 10px;
+      line-height: 1.2;
+      width: 132px;
+      flex-shrink: 0;
+      margin-left: -8px;
+    }
+    .thru-values .thru-line {
+      display: flex;
+    }
+    .thru-values .col {
+      width: 44px;
+      text-align: right;
+    }
+    .thru-values .col-now {
+      width: 44px;
+      text-align: right;
+    }
+    .thru-values .col-now .arrow {
+      font-size: 9px;
+      margin-left: 1px;
+    }
+    .thru-values .arrow-down { color: #4ade80; }
+    .thru-values .arrow-up { color: #60a5fa; }
+
+    /* Thru hover values */
+    .thru-hover {
+      display: flex;
+      flex-direction: column;
+      font-family: 'SF Mono', Monaco, 'Courier New', monospace;
+      font-size: 10px;
+      line-height: 1.2;
+      max-width: 0;
+      overflow: hidden;
+      flex-shrink: 0;
+      color: #a78bfa;
+      opacity: 0;
+      white-space: nowrap;
+      margin-left: 0;
+      transition: max-width 0.15s, opacity 0.15s, margin-left 0.15s;
+    }
+    .thru-hover.visible { max-width: 50px; opacity: 1; margin-left: 6px; }
+    .thru-hover span { text-align: right; }
+
+    /* Detail Panel */
+    .detail-panel {
+      display: none;
+      background: #1e1e36;
+      padding: 12px;
+    }
+    .detail-panel.open { display: block; }
+    .detail-wrap {
+      position: relative;
+      height: 80px;
+    }
+    .detail-wrap canvas {
+      width: 100%;
+      height: 100%;
+      border-radius: 4px;
+    }
+    .detail-wrap .y-max {
+      position: absolute;
+      top: 2px;
+      left: 4px;
+      font-size: 9px;
+      color: rgba(255,255,255,0.6);
+      font-family: 'SF Mono', Monaco, 'Courier New', monospace;
+      pointer-events: none;
+    }
+    .detail-wrap .detail-hover-val {
+      position: absolute;
+      top: 2px;
+      right: 4px;
+      font-size: 11px;
+      color: #a78bfa;
+      font-family: 'SF Mono', Monaco, 'Courier New', monospace;
+      pointer-events: none;
+      opacity: 0;
+      transition: opacity 0.1s;
+    }
+    .detail-wrap .detail-hover-val.visible { opacity: 1; }
+    .detail-wrap .detail-hover-time {
+      position: absolute;
+      bottom: 2px;
+      right: 4px;
+      font-size: 10px;
+      color: #a78bfa;
+      font-family: 'SF Mono', Monaco, 'Courier New', monospace;
+      pointer-events: none;
+      opacity: 0;
+      transition: opacity 0.1s;
+    }
+    .detail-wrap .detail-hover-time.visible { opacity: 1; }
+
+    /* Colors */
+    .good { color: #4ade80; }
+    .warn { color: #facc15; }
+    .bad { color: #f87171; }
+    .dot-good { background: #4ade80; }
+    .dot-warn { background: #facc15; }
+    .dot-bad { background: #f87171; }
+  </style>
+</head>
+<body>
+
+  <div class="stacked-layout" id="mainLayout">
+    <div class="stacked-header">
+      <div class="status-dot dot-good" id="stackStatusDot"></div>
+      <span class="status-text" id="stackStatusText">Online</span>
+      <span class="ssid" id="stackSsid">--</span>
+      <span class="last-update" id="lastUpdate"></span>
+      <span class="header-spacer"></span>
+      <span class="hover-time" id="hoverTime"></span>
+      <div class="col-headers">
+        <span>now</span>
+        <span>1m</span>
+        <span>p99</span>
+      </div>
+    </div>
+
+    <div class="stacked-row" onclick="toggleDetail('stack-web')">
+      <span class="label">Web</span>
+      <div class="spark-wrap" data-type="web">
+        <canvas class="sparkline" id="stackSparkWeb"></canvas>
+        <span class="y-max" id="yMaxWeb"></span>
+        <div class="hover-line" id="hoverLineWeb"></div>
+      </div>
+      <span class="hover-val" id="hoverWeb">--</span>
+      <div class="values">
+        <span class="col" id="stackWebNow">--</span>
+        <span class="col" id="stackWeb1m">--</span>
+        <span class="col" id="stackWebP99">--</span>
+      </div>
+    </div>
+    <div class="detail-panel" id="stack-web-detail" data-type="web">
+      <div class="detail-wrap">
+        <canvas id="stack-web-graph"></canvas>
+        <span class="y-max" id="yMaxWebDetail"></span>
+        <div class="hover-line" id="hoverLineWebDetail"></div>
+        <span class="detail-hover-val" id="hoverWebDetail">--</span>
+        <span class="detail-hover-time" id="hoverTimeWebDetail"></span>
+      </div>
+    </div>
+
+    <div class="stacked-row" onclick="toggleDetail('stack-ping')">
+      <span class="label">Ping</span>
+      <div class="spark-wrap" data-type="ping">
+        <canvas class="sparkline" id="stackSparkPing"></canvas>
+        <span class="y-max" id="yMaxPing"></span>
+        <div class="hover-line" id="hoverLinePing"></div>
+      </div>
+      <span class="hover-val" id="hoverPing">--</span>
+      <div class="values">
+        <span class="col" id="stackPingNow">--</span>
+        <span class="col" id="stackPing1m">--</span>
+        <span class="col" id="stackPingP99">--</span>
+      </div>
+    </div>
+    <div class="detail-panel" id="stack-ping-detail" data-type="ping">
+      <div class="detail-wrap">
+        <canvas id="stack-ping-graph"></canvas>
+        <span class="y-max" id="yMaxPingDetail"></span>
+        <div class="hover-line" id="hoverLinePingDetail"></div>
+        <span class="detail-hover-val" id="hoverPingDetail">--</span>
+        <span class="detail-hover-time" id="hoverTimePingDetail"></span>
+      </div>
+    </div>
+
+    <div class="stacked-row" onclick="toggleDetail('stack-thru')">
+      <span class="label">Thru</span>
+      <div class="spark-wrap" data-type="thru">
+        <canvas class="sparkline" id="stackSparkThru"></canvas>
+        <span class="y-max" id="yMaxThru"></span>
+        <div class="hover-line" id="hoverLineThru"></div>
+      </div>
+      <div class="thru-hover" id="hoverThru">
+        <span id="hoverThruDown">--</span>
+        <span id="hoverThruUp">--</span>
+      </div>
+      <div class="thru-values">
+        <div class="thru-line">
+          <span class="col-now"><span id="stackThruDownNow">--</span><span class="arrow arrow-down">↓</span></span><span class="col" id="stackThruDown1m">--</span><span class="col" id="stackThruDownPk">--</span>
+        </div>
+        <div class="thru-line">
+          <span class="col-now"><span id="stackThruUpNow">--</span><span class="arrow arrow-up">↑</span></span><span class="col" id="stackThruUp1m">--</span><span class="col" id="stackThruUpPk">--</span>
+        </div>
+      </div>
+    </div>
+    <div class="detail-panel" id="stack-thru-detail" data-type="thru">
+      <div class="detail-wrap">
+        <canvas id="stack-thru-graph"></canvas>
+        <span class="y-max" id="yMaxThruDetail"></span>
+        <div class="hover-line" id="hoverLineThruDetail"></div>
+        <span class="detail-hover-val" id="hoverThruDetail">--</span>
+        <span class="detail-hover-time" id="hoverTimeThruDetail"></span>
+      </div>
+    </div>
+
+    <div class="stacked-row avail-row" onclick="toggleDetail('stack-avail')">
+      <span class="label">Avail</span>
+      <div class="spark-wrap" data-type="avail">
+        <canvas class="sparkline" id="stackSparkAvail"></canvas>
+        <div class="hover-line" id="hoverLineAvail"></div>
+      </div>
+      <span class="hover-val" id="hoverAvail">--</span>
+      <div class="values">
+        <span class="col" id="stackAvailNow">--</span>
+        <span class="col" id="stackAvail1m">--</span>
+        <span class="col" id="stackAvail10m">--</span>
+      </div>
+    </div>
+    <div class="detail-panel" id="stack-avail-detail" data-type="avail">
+      <div class="detail-wrap">
+        <canvas id="stack-avail-graph"></canvas>
+        <div class="hover-line" id="hoverLineAvailDetail"></div>
+        <span class="detail-hover-val" id="hoverAvailDetail">--</span>
+        <span class="detail-hover-time" id="hoverTimeAvailDetail"></span>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    let state = { webHistory: [], pingHistory: [], txHistory: [], rxHistory: [], availHistory: [], interval: 5 };
+
+    function formatMsAligned(v) {
+      if (v < 0) return '  --';
+      const s = Math.round(v) + 'ms';
+      return s.padStart(5);
+    }
+
+    function formatMsShort(v) {
+      if (v < 0) return '--';
+      return Math.round(v) + 'ms';
+    }
+
+    function formatSpeedAligned(kbps) {
+      const mbps = kbps / 1000;
+      const s = mbps.toFixed(1) + 'M';
+      return s.padStart(6);
+    }
+
+    function formatSpeedShort(kbps) {
+      const mbps = kbps / 1000;
+      return mbps.toFixed(1) + 'M';
+    }
+
+    function formatPct(v) {
+      return v.toFixed(0) + '%';
+    }
+
+    function formatTime(secondsAgo) {
+      const d = new Date(Date.now() - secondsAgo * 1000);
+      const h = d.getHours();
+      const m = d.getMinutes().toString().padStart(2, '0');
+      const s = d.getSeconds().toString().padStart(2, '0');
+      return h + ':' + m + ':' + s;
+    }
+
+    function calcP99(arr) {
+      const valid = arr.filter(v => v > 0);
+      if (valid.length === 0) return 0;
+      const sorted = [...valid].sort((a, b) => a - b);
+      const idx = Math.floor(sorted.length * 0.99);
+      return sorted[Math.min(idx, sorted.length - 1)];
+    }
+
+    function calc1mAvg(arr, interval) {
+      const samples = Math.ceil(60 / interval);
+      const recent = arr.slice(-samples).filter(v => v > 0);
+      if (recent.length === 0) return 0;
+      return Math.round(recent.reduce((a, b) => a + b, 0) / recent.length);
+    }
+
+    function calc1mAvgThru(arr, interval) {
+      const samples = Math.ceil(60 / interval);
+      const recent = arr.slice(-samples);
+      if (recent.length === 0) return 0;
+      return Math.round(recent.reduce((a, b) => a + b, 0) / recent.length);
+    }
+
+    function calcAvailPct(arr, samples) {
+      const recent = arr.slice(-samples);
+      if (recent.length === 0) return 100;
+      const upCount = recent.filter(v => v === 1).length;
+      return (upCount / recent.length) * 100;
+    }
+
+    function getColor(type, value) {
+      if (value < 0) return '#666';
+      if (type === 'web') {
+        if (value < 100) return '#4ade80';
+        if (value < 300) return '#facc15';
+        return '#f87171';
+      }
+      if (type === 'ping') {
+        if (value < 30) return '#4ade80';
+        if (value < 80) return '#facc15';
+        return '#f87171';
+      }
+      if (type === 'avail') {
+        if (value >= 99) return '#4ade80';
+        if (value >= 90) return '#facc15';
+        return '#f87171';
+      }
+      return '#4ade80';
+    }
+
+    function getColorClass(type, value) {
+      if (value < 0) return '';
+      if (type === 'web') {
+        if (value < 100) return 'good';
+        if (value < 300) return 'warn';
+        return 'bad';
+      }
+      if (type === 'ping') {
+        if (value < 30) return 'good';
+        if (value < 80) return 'warn';
+        return 'bad';
+      }
+      if (type === 'avail') {
+        if (value >= 99) return 'good';
+        if (value >= 90) return 'warn';
+        return 'bad';
+      }
+      return 'good';
+    }
+
+    function drawSparkline(canvasId, data, type, yMaxId) {
+      const canvas = document.getElementById(canvasId);
+      if (!canvas) return;
+      const ctx = canvas.getContext('2d');
+      const dpr = window.devicePixelRatio || 1;
+      const rect = canvas.getBoundingClientRect();
+      canvas.width = rect.width * dpr;
+      canvas.height = rect.height * dpr;
+      ctx.scale(dpr, dpr);
+
+      const w = rect.width;
+      const h = rect.height;
+      const padding = 2;
+
+      ctx.clearRect(0, 0, w, h);
+      if (!data || data.length === 0) return;
+
+      const samples = data.slice(-30);
+      const max = Math.max(...samples.filter(v => v > 0), 1);
+      const stepX = (w - padding * 2) / (samples.length - 1 || 1);
+
+      if (yMaxId) {
+        const yMaxEl = document.getElementById(yMaxId);
+        if (yMaxEl) yMaxEl.textContent = Math.round(max) + (type === 'web' || type === 'ping' ? 'ms' : '');
+      }
+
+      ctx.lineWidth = 1.5;
+      ctx.lineCap = 'round';
+      ctx.lineJoin = 'round';
+
+      for (let i = 0; i < samples.length - 1; i++) {
+        const v1 = samples[i];
+        const v2 = samples[i + 1];
+        if (v1 < 0 && v2 < 0) continue;
+
+        const x1 = padding + i * stepX;
+        const x2 = padding + (i + 1) * stepX;
+        const y1 = v1 > 0 ? h - padding - ((v1 / max) * (h - padding * 2)) : h - padding;
+        const y2 = v2 > 0 ? h - padding - ((v2 / max) * (h - padding * 2)) : h - padding;
+
+        ctx.beginPath();
+        ctx.strokeStyle = getColor(type, v2);
+        ctx.moveTo(x1, y1);
+        ctx.lineTo(x2, y2);
+        ctx.stroke();
+      }
+    }
+
+    function drawSparklineAvail(canvasId, data) {
+      const canvas = document.getElementById(canvasId);
+      if (!canvas) return;
+      const ctx = canvas.getContext('2d');
+      const dpr = window.devicePixelRatio || 1;
+      const rect = canvas.getBoundingClientRect();
+      canvas.width = rect.width * dpr;
+      canvas.height = rect.height * dpr;
+      ctx.scale(dpr, dpr);
+
+      const w = rect.width;
+      const h = rect.height;
+      const padding = 2;
+
+      ctx.clearRect(0, 0, w, h);
+      if (!data || data.length === 0) return;
+
+      const samples = data.slice(-30);
+      const stepX = (w - padding * 2) / samples.length;
+      const centerY = h / 2;
+
+      for (let i = 0; i < samples.length; i++) {
+        const x = padding + i * stepX + stepX / 2;
+        ctx.fillStyle = samples[i] === 1 ? '#4ade80' : '#f87171';
+        ctx.beginPath();
+        ctx.arc(x, centerY, 1.5, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+
+    function drawSparklineDual(canvasId, data1, data2, yMaxId) {
+      const canvas = document.getElementById(canvasId);
+      if (!canvas) return;
+      const ctx = canvas.getContext('2d');
+      const dpr = window.devicePixelRatio || 1;
+      const rect = canvas.getBoundingClientRect();
+      canvas.width = rect.width * dpr;
+      canvas.height = rect.height * dpr;
+      ctx.scale(dpr, dpr);
+
+      const w = rect.width;
+      const h = rect.height;
+      const padding = 2;
+
+      ctx.clearRect(0, 0, w, h);
+
+      const samples1 = (data1 || []).slice(-30);
+      const samples2 = (data2 || []).slice(-30);
+      if (samples1.length === 0 && samples2.length === 0) return;
+
+      const max = Math.max(...samples1, ...samples2, 1);
+      const len = Math.max(samples1.length, samples2.length);
+      const stepX = (w - padding * 2) / (len - 1 || 1);
+
+      if (yMaxId) {
+        const yMaxEl = document.getElementById(yMaxId);
+        if (yMaxEl) yMaxEl.textContent = (max / 1000).toFixed(1) + 'M';
+      }
+
+      ctx.lineWidth = 1.5;
+      ctx.strokeStyle = '#4ade80';
+      ctx.beginPath();
+      for (let i = 0; i < samples1.length; i++) {
+        const x = padding + i * stepX;
+        const y = h - padding - ((samples1[i] / max) * (h - padding * 2));
+        if (i === 0) ctx.moveTo(x, y);
+        else ctx.lineTo(x, y);
+      }
+      ctx.stroke();
+
+      ctx.strokeStyle = '#60a5fa';
+      ctx.beginPath();
+      for (let i = 0; i < samples2.length; i++) {
+        const x = padding + i * stepX;
+        const y = h - padding - ((samples2[i] / max) * (h - padding * 2));
+        if (i === 0) ctx.moveTo(x, y);
+        else ctx.lineTo(x, y);
+      }
+      ctx.stroke();
+    }
+
+    function drawDetailGraph(canvasId, data, type, yMaxId) {
+      const canvas = document.getElementById(canvasId);
+      if (!canvas) return;
+      const ctx = canvas.getContext('2d');
+      const dpr = window.devicePixelRatio || 1;
+      const rect = canvas.getBoundingClientRect();
+      canvas.width = rect.width * dpr;
+      canvas.height = rect.height * dpr;
+      ctx.scale(dpr, dpr);
+
+      const w = rect.width;
+      const h = rect.height;
+      const padding = 4;
+
+      ctx.fillStyle = '#1a1a2e';
+      ctx.fillRect(0, 0, w, h);
+
+      if (!data || data.length === 0) return;
+
+      const max = Math.max(...data.filter(v => v > 0), 1) * 1.1;
+      const stepX = (w - padding * 2) / (data.length - 1 || 1);
+
+      if (yMaxId) {
+        const yMaxEl = document.getElementById(yMaxId);
+        if (yMaxEl) {
+          if (type === 'web' || type === 'ping') {
+            yMaxEl.textContent = Math.round(max) + 'ms';
+          } else {
+            yMaxEl.textContent = (max / 1000).toFixed(1) + 'M';
+          }
+        }
+      }
+
+      ctx.lineWidth = 2;
+      ctx.lineCap = 'round';
+
+      for (let i = 0; i < data.length - 1; i++) {
+        const v1 = data[i];
+        const v2 = data[i + 1];
+        if (v1 < 0 && v2 < 0) continue;
+
+        const x1 = padding + i * stepX;
+        const x2 = padding + (i + 1) * stepX;
+        const y1 = v1 > 0 ? h - padding - ((v1 / max) * (h - padding * 2)) : h - padding;
+        const y2 = v2 > 0 ? h - padding - ((v2 / max) * (h - padding * 2)) : h - padding;
+
+        ctx.beginPath();
+        ctx.strokeStyle = getColor(type, v2);
+        ctx.moveTo(x1, y1);
+        ctx.lineTo(x2, y2);
+        ctx.stroke();
+      }
+    }
+
+    function drawDetailAvail(canvasId, data) {
+      const canvas = document.getElementById(canvasId);
+      if (!canvas) return;
+      const ctx = canvas.getContext('2d');
+      const dpr = window.devicePixelRatio || 1;
+      const rect = canvas.getBoundingClientRect();
+      canvas.width = rect.width * dpr;
+      canvas.height = rect.height * dpr;
+      ctx.scale(dpr, dpr);
+
+      const w = rect.width;
+      const h = rect.height;
+      const padding = 4;
+
+      ctx.fillStyle = '#1a1a2e';
+      ctx.fillRect(0, 0, w, h);
+
+      if (!data || data.length === 0) return;
+
+      const stepX = (w - padding * 2) / data.length;
+      const centerY = h / 2;
+
+      for (let i = 0; i < data.length; i++) {
+        const x = padding + i * stepX + stepX / 2;
+        ctx.fillStyle = data[i] === 1 ? '#4ade80' : '#f87171';
+        ctx.beginPath();
+        ctx.arc(x, centerY, 3, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+
+    // Hover handling for sparklines
+    function setupHover() {
+      const layout = document.getElementById('mainLayout');
+      const sparkWraps = document.querySelectorAll('.spark-wrap');
+      const hoverLines = ['hoverLineWeb', 'hoverLinePing', 'hoverLineThru', 'hoverLineAvail'];
+      const hoverTime = document.getElementById('hoverTime');
+      let isHovering = false;
+
+      function showHoverElements() {
+        document.getElementById('hoverWeb').classList.add('visible');
+        document.getElementById('hoverPing').classList.add('visible');
+        document.getElementById('hoverThru').classList.add('visible');
+        document.getElementById('hoverAvail').classList.add('visible');
+        hoverTime.classList.add('visible');
+      }
+
+      function updateHover(pct, idx) {
+        hoverLines.forEach(id => {
+          const el = document.getElementById(id);
+          if (el) {
+            el.style.display = 'block';
+            el.style.left = (pct * 100) + '%';
+          }
+        });
+
+        const webSamples = state.webHistory.slice(-30);
+        const pingSamples = state.pingHistory.slice(-30);
+        const txSamples = state.txHistory.slice(-30);
+        const rxSamples = state.rxHistory.slice(-30);
+        const availSamples = state.availHistory.slice(-30);
+
+        document.getElementById('hoverWeb').textContent = webSamples[idx] !== undefined ? formatMsShort(webSamples[idx]) : '--';
+        document.getElementById('hoverPing').textContent = pingSamples[idx] !== undefined ? formatMsShort(pingSamples[idx]) : '--';
+        document.getElementById('hoverThruDown').textContent = txSamples[idx] !== undefined ? formatSpeedShort(txSamples[idx]) : '--';
+        document.getElementById('hoverThruUp').textContent = rxSamples[idx] !== undefined ? formatSpeedShort(rxSamples[idx]) : '--';
+        document.getElementById('hoverAvail').textContent = availSamples[idx] !== undefined ? (availSamples[idx] === 1 ? 'OK' : 'FAIL') : '--';
+
+        const samplesAgo = 29 - idx;
+        const secondsAgo = samplesAgo * state.interval;
+        hoverTime.textContent = formatTime(secondsAgo);
+      }
+
+      function hideHover() {
+        isHovering = false;
+        hoverLines.forEach(id => {
+          const el = document.getElementById(id);
+          if (el) el.style.display = 'none';
+        });
+        document.getElementById('hoverWeb').classList.remove('visible');
+        document.getElementById('hoverPing').classList.remove('visible');
+        document.getElementById('hoverThru').classList.remove('visible');
+        document.getElementById('hoverAvail').classList.remove('visible');
+        hoverTime.classList.remove('visible');
+      }
+
+      // Per-sparkline hover handling
+      sparkWraps.forEach(wrap => {
+        const canvas = wrap.querySelector('canvas');
+        canvas.addEventListener('mouseenter', () => {
+          if (!isHovering) {
+            isHovering = true;
+            showHoverElements();
+          }
+        });
+        canvas.addEventListener('mousemove', (e) => {
+          const rect = canvas.getBoundingClientRect();
+          const x = e.clientX - rect.left;
+          const pct = Math.max(0, Math.min(1, x / rect.width));
+          const idx = Math.min(29, Math.floor(pct * 30));
+          updateHover(pct, idx);
+        });
+        canvas.addEventListener('mouseleave', (e) => {
+          // Only hide if not entering another sparkline
+          const toEl = e.relatedTarget;
+          if (!toEl || !toEl.closest('.spark-wrap')) {
+            hideHover();
+          }
+        });
+      });
+    }
+
+    // Hover handling for detail graphs
+    function setupDetailHover() {
+      const detailWraps = document.querySelectorAll('.detail-wrap');
+
+      detailWraps.forEach(wrap => {
+        const canvas = wrap.querySelector('canvas');
+        const hoverLine = wrap.querySelector('.hover-line');
+        const hoverVal = wrap.querySelector('.detail-hover-val');
+        const hoverTime = wrap.querySelector('.detail-hover-time');
+        const panel = wrap.closest('.detail-panel');
+        const type = panel.dataset.type;
+
+        canvas.addEventListener('mousemove', (e) => {
+          const rect = canvas.getBoundingClientRect();
+          const x = e.clientX - rect.left;
+          const pct = Math.max(0, Math.min(1, x / rect.width));
+
+          let data, len;
+          if (type === 'web') data = state.webHistory;
+          else if (type === 'ping') data = state.pingHistory;
+          else if (type === 'thru') { data = state.txHistory; }
+          else if (type === 'avail') data = state.availHistory;
+
+          len = data ? data.length : 0;
+          const idx = Math.min(len - 1, Math.floor(pct * len));
+
+          if (hoverLine) {
+            hoverLine.style.display = 'block';
+            hoverLine.style.left = (pct * 100) + '%';
+          }
+
+          if (hoverVal && data && idx >= 0) {
+            let val = data[idx];
+            if (type === 'web' || type === 'ping') {
+              hoverVal.textContent = formatMsShort(val);
+            } else if (type === 'thru') {
+              const rxVal = state.rxHistory[idx] || 0;
+              hoverVal.textContent = '↓' + formatSpeedShort(val) + ' ↑' + formatSpeedShort(rxVal);
+            } else if (type === 'avail') {
+              hoverVal.textContent = val === 1 ? 'OK' : 'FAIL';
+            }
+            hoverVal.classList.add('visible');
+          }
+
+          if (hoverTime && len > 0) {
+            const samplesAgo = len - 1 - idx;
+            const secondsAgo = samplesAgo * state.interval;
+            hoverTime.textContent = formatTime(secondsAgo);
+            hoverTime.classList.add('visible');
+          }
+        });
+
+        canvas.addEventListener('mouseleave', () => {
+          if (hoverLine) hoverLine.style.display = 'none';
+          if (hoverVal) hoverVal.classList.remove('visible');
+          if (hoverTime) hoverTime.classList.remove('visible');
+        });
+      });
+    }
+
+    function toggleDetail(id) {
+      const panel = document.getElementById(id + '-detail');
+      if (!panel) return;
+
+      document.querySelectorAll('.detail-panel').forEach(p => {
+        if (p.id !== id + '-detail') p.classList.remove('open');
+      });
+
+      panel.classList.toggle('open');
+
+      if (panel.classList.contains('open')) {
+        setTimeout(() => {
+          if (id.includes('web')) drawDetailGraph('stack-web-graph', state.webHistory, 'web', 'yMaxWebDetail');
+          else if (id.includes('ping')) drawDetailGraph('stack-ping-graph', state.pingHistory, 'ping', 'yMaxPingDetail');
+          else if (id.includes('thru')) drawSparklineDual('stack-thru-graph', state.txHistory, state.rxHistory, 'yMaxThruDetail');
+          else if (id.includes('avail')) drawDetailAvail('stack-avail-graph', state.availHistory);
+        }, 10);
+      }
+    }
+
+    function updateStatus(availHistory) {
+      const pct = calcAvailPct(availHistory, 12);
+      let status, dotClass;
+      if (pct >= 99) { status = 'Online'; dotClass = 'dot-good'; }
+      else if (pct >= 80) { status = 'Degraded'; dotClass = 'dot-warn'; }
+      else { status = 'Offline'; dotClass = 'dot-bad'; }
+      document.getElementById('stackStatusText').textContent = status;
+      document.getElementById('stackStatusDot').className = 'status-dot ' + dotClass;
+    }
+
+    async function fetchData() {
+      try {
+        const res = await fetch('/data.json?' + Date.now());
+        const data = await res.json();
+        state.interval = data.interval || 5;
+
+        state.webHistory = data.web?.history || [];
+        state.pingHistory = (data.ping?.history || []).filter(v => v > 0);
+        state.txHistory = data.throughput?.tx_history || [];
+        state.rxHistory = data.throughput?.rx_history || [];
+        state.availHistory = data.avail?.history || [];
+
+        const webNow = data.web?.ms || -1;
+        const pingNow = data.ping?.current || -1;
+        const txNow = data.throughput?.tx_kbps || 0;
+        const rxNow = data.throughput?.rx_kbps || 0;
+        const txPeak = data.throughput?.tx_peak || 0;
+        const rxPeak = data.throughput?.rx_peak || 0;
+
+        const webP99 = calcP99(state.webHistory);
+        const pingP99 = calcP99(state.pingHistory);
+        const web1m = calc1mAvg(state.webHistory, state.interval);
+        const ping1m = calc1mAvg(state.pingHistory, state.interval);
+        const tx1m = calc1mAvgThru(state.txHistory, state.interval);
+        const rx1m = calc1mAvgThru(state.rxHistory, state.interval);
+
+        const availNow = calcAvailPct(state.availHistory, 12);
+        const avail1m = calcAvailPct(state.availHistory, Math.ceil(60 / state.interval));
+        const avail10m = calcAvailPct(state.availHistory, 120);
+
+        document.getElementById('stackSsid').textContent = data.uplink_ssid || '--';
+        const now = new Date();
+        document.getElementById('lastUpdate').textContent = now.getHours() + ':' + now.getMinutes().toString().padStart(2,'0') + ':' + now.getSeconds().toString().padStart(2,'0');
+
+        document.getElementById('stackWebNow').textContent = formatMsAligned(webNow);
+        document.getElementById('stackWebNow').className = 'col ' + getColorClass('web', webNow);
+        document.getElementById('stackWeb1m').textContent = formatMsAligned(web1m);
+        document.getElementById('stackWebP99').textContent = formatMsAligned(webP99);
+
+        document.getElementById('stackPingNow').textContent = formatMsAligned(pingNow);
+        document.getElementById('stackPingNow').className = 'col ' + getColorClass('ping', pingNow);
+        document.getElementById('stackPing1m').textContent = formatMsAligned(ping1m);
+        document.getElementById('stackPingP99').textContent = formatMsAligned(pingP99);
+
+        document.getElementById('stackThruDownNow').textContent = formatSpeedAligned(txNow);
+        document.getElementById('stackThruDown1m').textContent = formatSpeedAligned(tx1m);
+        document.getElementById('stackThruDownPk').textContent = formatSpeedAligned(txPeak);
+        document.getElementById('stackThruUpNow').textContent = formatSpeedAligned(rxNow);
+        document.getElementById('stackThruUp1m').textContent = formatSpeedAligned(rx1m);
+        document.getElementById('stackThruUpPk').textContent = formatSpeedAligned(rxPeak);
+
+        document.getElementById('stackAvailNow').textContent = formatPct(availNow);
+        document.getElementById('stackAvailNow').className = 'col ' + getColorClass('avail', availNow);
+        document.getElementById('stackAvail1m').textContent = formatPct(avail1m);
+        document.getElementById('stackAvail10m').textContent = formatPct(avail10m);
+
+        drawSparkline('stackSparkWeb', state.webHistory, 'web', 'yMaxWeb');
+        drawSparkline('stackSparkPing', state.pingHistory, 'ping', 'yMaxPing');
+        drawSparklineDual('stackSparkThru', state.txHistory, state.rxHistory, 'yMaxThru');
+        drawSparklineAvail('stackSparkAvail', state.availHistory);
+
+        document.querySelectorAll('.detail-panel.open').forEach(panel => {
+          const id = panel.id.replace('-detail', '');
+          if (id.includes('web')) drawDetailGraph('stack-web-graph', state.webHistory, 'web', 'yMaxWebDetail');
+          else if (id.includes('ping')) drawDetailGraph('stack-ping-graph', state.pingHistory, 'ping', 'yMaxPingDetail');
+          else if (id.includes('thru')) drawSparklineDual('stack-thru-graph', state.txHistory, state.rxHistory, 'yMaxThruDetail');
+          else if (id.includes('avail')) drawDetailAvail('stack-avail-graph', state.availHistory);
+        });
+
+        updateStatus(state.availHistory);
+      } catch (e) {
+        console.error('Fetch error:', e);
+      }
+    }
+
+    fetchData();
+    setInterval(fetchData, 5000);
+    setupHover();
+    setupDetailHover();
+  </script>
+</body>
+</html>
