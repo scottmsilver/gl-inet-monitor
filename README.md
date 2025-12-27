@@ -49,7 +49,44 @@ We use `iw dev wlanX station dump` which gets byte counters directly from the Wi
 
 - GL.iNet Beryl AX (MT3000) or similar OpenWrt router
 - SSH access with key authentication
-- Router accessible at 192.168.8.1
+- Router accessible at 192.168.8.1 (default GL.iNet IP)
+
+### Setting Up SSH Key Authentication
+
+If you haven't set up SSH key auth with your router yet:
+
+```bash
+# 1. Generate a key (if you don't have one)
+ssh-keygen -t ed25519 -f ~/.ssh/your_router_key -C "router-access"
+
+# 2. Enable SSH on your router
+#    - Open http://192.168.8.1 in browser
+#    - Go to System → Security → SSH
+#    - Enable SSH and set to "LAN only" or as needed
+
+# 3. Copy your public key to the router
+ssh-copy-id -i ~/.ssh/your_router_key root@192.168.8.1
+#    (Enter your router's admin password when prompted)
+
+# 4. Test the connection
+ssh -i ~/.ssh/your_router_key root@192.168.8.1 "echo 'SSH key auth works!'"
+```
+
+**Alternative manual method** (if ssh-copy-id doesn't work):
+
+```bash
+# Copy your public key content
+cat ~/.ssh/your_router_key.pub
+
+# SSH in with password
+ssh root@192.168.8.1
+
+# On the router, add your key
+echo "YOUR_PUBLIC_KEY_HERE" >> /etc/dropbear/authorized_keys
+chmod 600 /etc/dropbear/authorized_keys
+```
+
+**Note**: GL.iNet routers use Dropbear (not OpenSSH), so authorized keys go in `/etc/dropbear/authorized_keys`.
 
 ### Install Steps
 
