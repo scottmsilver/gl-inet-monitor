@@ -30,39 +30,55 @@
       font-size: 13px;
     }
     .stacked-header .status-icon {
-      cursor: help;
-      position: relative;
+      cursor: pointer;
       display: flex;
       align-items: center;
     }
     .stacked-header .status-icon svg {
       display: block;
     }
-    .stacked-header .status-icon::after {
-      content: attr(data-tooltip);
-      position: absolute;
-      left: 0;
-      top: 100%;
-      margin-top: 6px;
-      background: #1a1a2e;
-      border: 1px solid rgba(255,255,255,0.2);
-      padding: 6px 10px;
-      border-radius: 6px;
-      font-size: 11px;
-      white-space: nowrap;
-      opacity: 0;
-      pointer-events: none;
-      transition: opacity 0.2s;
-      z-index: 100;
-      box-shadow: 0 4px 12px rgba(0,0,0,0.3);
-    }
-    .stacked-header .status-icon:hover::after {
-      opacity: 1;
-      transition-delay: 0.4s;
-    }
     .status-icon.good { color: #4ade80; }
     .status-icon.warn { color: #facc15; }
     .status-icon.bad { color: #f87171; }
+
+    /* Connection info panel */
+    .conn-panel {
+      display: none;
+      background: #1e1e36;
+      padding: 10px 14px;
+      border-bottom: 1px solid rgba(255,255,255,0.1);
+      font-size: 11px;
+    }
+    .conn-panel.open { display: block; }
+    .conn-panel .conn-row {
+      display: flex;
+      justify-content: space-between;
+      padding: 2px 0;
+    }
+    .conn-panel .conn-label {
+      color: #888;
+    }
+    .conn-panel .conn-value {
+      color: #eee;
+      font-family: 'SF Mono', Monaco, 'Courier New', monospace;
+    }
+    .conn-panel .conn-value.good { color: #4ade80; }
+    .conn-panel .conn-value.warn { color: #facc15; }
+    .conn-panel .conn-value.bad { color: #f87171; }
+    .conn-panel .conn-thresholds {
+      display: flex;
+      gap: 16px;
+      margin-top: 4px;
+      padding-top: 6px;
+      border-top: 1px solid rgba(255,255,255,0.05);
+    }
+    .conn-panel .threshold-item {
+      font-size: 10px;
+      color: #666;
+    }
+    .conn-panel .threshold-item span {
+      color: #888;
+    }
     .stacked-header .ssid {
       color: #666;
       font-size: 11px;
@@ -359,6 +375,25 @@
         <span>now</span>
         <span class="col-extra">1m</span>
         <span class="col-extra">p99</span>
+      </div>
+    </div>
+
+    <div class="conn-panel" id="connPanel">
+      <div class="conn-row">
+        <span class="conn-label">Status</span>
+        <span class="conn-value" id="connStatus">--</span>
+      </div>
+      <div class="conn-row">
+        <span class="conn-label">Type</span>
+        <span class="conn-value" id="connType">--</span>
+      </div>
+      <div class="conn-row">
+        <span class="conn-label">ISP</span>
+        <span class="conn-value" id="connIsp">--</span>
+      </div>
+      <div class="conn-thresholds">
+        <div class="threshold-item">Ping: <span id="connPingTh">--</span></div>
+        <div class="threshold-item">Web: <span id="connWebTh">--</span></div>
       </div>
     </div>
 
@@ -1121,6 +1156,47 @@
       }
     }
 
+    // Icons for connection types (SVG line art)
+    const connIcons = {
+      airplane: `<svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round">
+        <path d="M2 12 L6 8"/>
+        <circle cx="5" cy="9" r="2.5"/>
+        <path d="M9 7 A4 4 0 0 1 9 3"/>
+        <path d="M11 8 A6 6 0 0 1 11 2"/>
+      </svg>`,
+      starlink: `<svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round">
+        <ellipse cx="7" cy="10" rx="5" ry="2"/>
+        <circle cx="7" cy="5" r="2"/>
+        <path d="M7 7 L7 8"/>
+      </svg>`,
+      geo_satellite: `<svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round">
+        <circle cx="7" cy="7" r="2"/>
+        <circle cx="7" cy="7" r="5"/>
+      </svg>`,
+      maritime: `<svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round">
+        <path d="M2 10 Q5 8 7 10 Q9 12 12 10"/>
+        <path d="M4 7 L7 3 L10 7 Z"/>
+      </svg>`,
+      cellular: `<svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round">
+        <path d="M3 11 L3 9"/>
+        <path d="M6 11 L6 7"/>
+        <path d="M9 11 L9 5"/>
+        <path d="M12 11 L12 3"/>
+      </svg>`,
+      landline: `<svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round">
+        <circle cx="7" cy="7" r="3"/>
+      </svg>`,
+      unknown: `<svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round">
+        <circle cx="7" cy="7" r="5"/>
+        <path d="M5.5 5.5 Q7 4 8 5.5 Q9 7 7 8"/>
+        <circle cx="7" cy="10.5" r="0.5" fill="currentColor"/>
+      </svg>`
+    };
+    const connLabels = {
+      airplane: 'Airplane WiFi', starlink: 'Starlink', geo_satellite: 'GEO Satellite',
+      maritime: 'Maritime', cellular: 'Cellular', landline: 'Landline', unknown: 'Unknown'
+    };
+
     function updateStatus(availHistory) {
       const pct = calcAvailPct(availHistory, 12);
       let status, statusClass;
@@ -1128,50 +1204,58 @@
       else if (pct >= 80) { status = 'Degraded'; statusClass = 'warn'; }
       else { status = 'Offline'; statusClass = 'bad'; }
 
-      // Icons for connection types (SVG line art)
-      const icons = {
-        airplane: `<svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round">
-          <path d="M2 12 L6 8"/>
-          <circle cx="5" cy="9" r="2.5"/>
-          <path d="M9 7 A4 4 0 0 1 9 3"/>
-          <path d="M11 8 A6 6 0 0 1 11 2"/>
-        </svg>`,
-        starlink: `<svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round">
-          <ellipse cx="7" cy="10" rx="5" ry="2"/>
-          <circle cx="7" cy="5" r="2"/>
-          <path d="M7 7 L7 8"/>
-        </svg>`,
-        geo_satellite: `<svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round">
-          <circle cx="7" cy="7" r="2"/>
-          <circle cx="7" cy="7" r="5"/>
-        </svg>`,
-        maritime: `<svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round">
-          <path d="M2 10 Q5 8 7 10 Q9 12 12 10"/>
-          <path d="M4 7 L7 3 L10 7 Z"/>
-        </svg>`,
-        cellular: `<svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round">
-          <path d="M3 11 L3 9"/>
-          <path d="M6 11 L6 7"/>
-          <path d="M9 11 L9 5"/>
-          <path d="M12 11 L12 3"/>
-        </svg>`,
-        landline: `<svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round">
-          <circle cx="7" cy="7" r="3"/>
-        </svg>`
-      };
-      const labels = {
-        airplane: 'Airplane WiFi', starlink: 'Starlink', geo_satellite: 'Satellite',
-        maritime: 'Maritime', cellular: 'Cellular', landline: 'Landline'
-      };
+      const connType = state.uplink?.connection_type || 'unknown';
+      const connLabel = connLabels[connType] || connType;
+      const isp = state.uplink?.isp || 'Unknown';
+      const pingTh = state.thresholds?.ping;
+      const webTh = state.thresholds?.web;
 
-      const connType = state.uplink?.connection_type || 'landline';
-      const connLabel = labels[connType] || connType;
-      const isp = state.uplink?.isp || '';
-
+      // Update icon
       const iconEl = document.getElementById('statusIcon');
-      iconEl.innerHTML = icons[connType] || icons.landline;
+      iconEl.innerHTML = connIcons[connType] || connIcons.unknown;
       iconEl.className = 'status-icon ' + statusClass;
-      iconEl.setAttribute('data-tooltip', `${status} · ${connLabel}${isp ? ' (' + isp + ')' : ''}`);
+
+      // Update panel content
+      const statusEl = document.getElementById('connStatus');
+      statusEl.textContent = status;
+      statusEl.className = 'conn-value ' + statusClass;
+      document.getElementById('connType').textContent = connLabel;
+      document.getElementById('connIsp').textContent = isp;
+      document.getElementById('connPingTh').textContent = pingTh ? `<${pingTh.good}ms good, <${pingTh.warn}ms warn` : '--';
+      document.getElementById('connWebTh').textContent = webTh ? `<${webTh.good}ms good, <${webTh.warn}ms warn` : '--';
+    }
+
+    function setupConnPanel() {
+      const iconEl = document.getElementById('statusIcon');
+      const panel = document.getElementById('connPanel');
+      let hideTimeout = null;
+
+      function showPanel() {
+        if (hideTimeout) { clearTimeout(hideTimeout); hideTimeout = null; }
+        panel.classList.add('open');
+      }
+
+      function hidePanel(delay = 0) {
+        if (hideTimeout) clearTimeout(hideTimeout);
+        hideTimeout = setTimeout(() => panel.classList.remove('open'), delay);
+      }
+
+      // Mouse: show on enter, hide on leave with delay
+      iconEl.addEventListener('mouseenter', showPanel);
+      iconEl.addEventListener('mouseleave', () => hidePanel(300));
+      panel.addEventListener('mouseenter', showPanel);
+      panel.addEventListener('mouseleave', () => hidePanel(300));
+
+      // Touch: toggle on tap, auto-hide after delay
+      iconEl.addEventListener('touchstart', (e) => {
+        e.preventDefault();
+        if (panel.classList.contains('open')) {
+          panel.classList.remove('open');
+        } else {
+          showPanel();
+          hideTimeout = setTimeout(() => panel.classList.remove('open'), 3000);
+        }
+      }, { passive: false });
     }
 
     async function fetchData() {
@@ -1262,6 +1346,7 @@
     setInterval(fetchData, 5000);
     setupHover();
     setupDetailHover();
+    setupConnPanel();
   </script>
 </body>
 </html>
