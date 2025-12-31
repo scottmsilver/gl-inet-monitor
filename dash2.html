@@ -54,7 +54,6 @@
     }
     .stacked-header .col-headers {
       display: flex;
-      width: 132px;
       flex-shrink: 0;
       margin-left: -8px;
     }
@@ -64,6 +63,18 @@
       font-size: 10px;
       color: #666;
       text-transform: uppercase;
+    }
+    .stacked-header .col-headers .col-extra {
+      width: 0;
+      max-width: 0;
+      overflow: hidden;
+      opacity: 0;
+      transition: width 0.15s, max-width 0.15s, opacity 0.15s;
+    }
+    .stacked-header .col-headers.expanded .col-extra {
+      width: 44px;
+      max-width: 44px;
+      opacity: 1;
     }
     .stacked-header .hover-time {
       color: #a78bfa;
@@ -117,10 +128,11 @@
       position: absolute;
       top: -1px;
       left: 2px;
-      font-size: 8px;
-      color: rgba(255,255,255,0.6);
+      font-size: 9px;
+      color: rgba(255,255,255,0.8);
       font-family: 'SF Mono', Monaco, 'Courier New', monospace;
       pointer-events: none;
+      text-shadow: 0 0 3px rgba(0,0,0,0.8);
     }
     .spark-wrap .hover-line, .detail-wrap .hover-line {
       position: absolute;
@@ -137,13 +149,22 @@
       display: flex;
       font-family: 'SF Mono', Monaco, 'Courier New', monospace;
       font-size: 12px;
-      width: 132px;
       flex-shrink: 0;
       margin-left: -8px;
     }
     .stacked-row .values .col {
       width: 44px;
       text-align: right;
+    }
+    .stacked-row .values .col-extra {
+      max-width: 0;
+      overflow: hidden;
+      opacity: 0;
+      transition: max-width 0.15s, opacity 0.15s;
+    }
+    .stacked-row .values.expanded .col-extra {
+      max-width: 44px;
+      opacity: 1;
     }
 
     /* Hover value - appears during hover */
@@ -169,7 +190,6 @@
       font-family: 'SF Mono', Monaco, 'Courier New', monospace;
       font-size: 10px;
       line-height: 1.2;
-      width: 132px;
       flex-shrink: 0;
       margin-left: -8px;
     }
@@ -179,6 +199,16 @@
     .thru-values .col {
       width: 44px;
       text-align: right;
+    }
+    .thru-values .col-extra {
+      max-width: 0;
+      overflow: hidden;
+      opacity: 0;
+      transition: max-width 0.15s, opacity 0.15s;
+    }
+    .thru-values.expanded .col-extra {
+      max-width: 44px;
+      opacity: 1;
     }
     .thru-values .col-now {
       width: 44px;
@@ -230,10 +260,11 @@
       position: absolute;
       top: 2px;
       left: 4px;
-      font-size: 9px;
-      color: rgba(255,255,255,0.6);
+      font-size: 10px;
+      color: rgba(255,255,255,0.85);
       font-family: 'SF Mono', Monaco, 'Courier New', monospace;
       pointer-events: none;
+      text-shadow: 0 0 3px rgba(0,0,0,0.8);
     }
     .detail-wrap .detail-hover-val {
       position: absolute;
@@ -279,10 +310,10 @@
       <span class="last-update" id="lastUpdate"></span>
       <span class="header-spacer"></span>
       <span class="hover-time" id="hoverTime"></span>
-      <div class="col-headers">
+      <div class="col-headers" id="colHeaders">
         <span>now</span>
-        <span>1m</span>
-        <span>p99</span>
+        <span class="col-extra">1m</span>
+        <span class="col-extra">p99</span>
       </div>
     </div>
 
@@ -294,10 +325,10 @@
         <div class="hover-line" id="hoverLineWeb"></div>
       </div>
       <span class="hover-val" id="hoverWeb">--</span>
-      <div class="values">
+      <div class="values" id="valuesWeb">
         <span class="col" id="stackWebNow">--</span>
-        <span class="col" id="stackWeb1m">--</span>
-        <span class="col" id="stackWebP99">--</span>
+        <span class="col col-extra" id="stackWeb1m">--</span>
+        <span class="col col-extra" id="stackWebP99">--</span>
       </div>
     </div>
     <div class="detail-panel" id="stack-web-detail" data-type="web">
@@ -318,10 +349,10 @@
         <div class="hover-line" id="hoverLinePing"></div>
       </div>
       <span class="hover-val" id="hoverPing">--</span>
-      <div class="values">
+      <div class="values" id="valuesPing">
         <span class="col" id="stackPingNow">--</span>
-        <span class="col" id="stackPing1m">--</span>
-        <span class="col" id="stackPingP99">--</span>
+        <span class="col col-extra" id="stackPing1m">--</span>
+        <span class="col col-extra" id="stackPingP99">--</span>
       </div>
     </div>
     <div class="detail-panel" id="stack-ping-detail" data-type="ping">
@@ -345,12 +376,12 @@
         <span id="hoverThruDown">--</span>
         <span id="hoverThruUp">--</span>
       </div>
-      <div class="thru-values">
+      <div class="thru-values" id="valuesThru">
         <div class="thru-line">
-          <span class="col-now"><span id="stackThruDownNow">--</span><span class="arrow arrow-down">↓</span></span><span class="col" id="stackThruDown1m">--</span><span class="col" id="stackThruDownPk">--</span>
+          <span class="col-now"><span id="stackThruDownNow">--</span><span class="arrow arrow-down">↓</span></span><span class="col col-extra" id="stackThruDown1m">--</span><span class="col col-extra" id="stackThruDownPk">--</span>
         </div>
         <div class="thru-line">
-          <span class="col-now"><span id="stackThruUpNow">--</span><span class="arrow arrow-up">↑</span></span><span class="col" id="stackThruUp1m">--</span><span class="col" id="stackThruUpPk">--</span>
+          <span class="col-now"><span id="stackThruUpNow">--</span><span class="arrow arrow-up">↑</span></span><span class="col col-extra" id="stackThruUp1m">--</span><span class="col col-extra" id="stackThruUpPk">--</span>
         </div>
       </div>
     </div>
@@ -371,10 +402,10 @@
         <div class="hover-line" id="hoverLineAvail"></div>
       </div>
       <span class="hover-val" id="hoverAvail">--</span>
-      <div class="values">
+      <div class="values" id="valuesAvail">
         <span class="col" id="stackAvailNow">--</span>
-        <span class="col" id="stackAvail1m">--</span>
-        <span class="col" id="stackAvail10m">--</span>
+        <span class="col col-extra" id="stackAvail1m">--</span>
+        <span class="col col-extra" id="stackAvail10m">--</span>
       </div>
     </div>
     <div class="detail-panel" id="stack-avail-detail" data-type="avail">
@@ -714,13 +745,25 @@
       const hoverLines = ['hoverLineWeb', 'hoverLinePing', 'hoverLineThru', 'hoverLineAvail'];
       const hoverTime = document.getElementById('hoverTime');
       let isHovering = false;
+      let hideTimeout = null;
+      let isTouchExpanded = false;
 
       function showHoverElements() {
+        if (hideTimeout) {
+          clearTimeout(hideTimeout);
+          hideTimeout = null;
+        }
         document.getElementById('hoverWeb').classList.add('visible');
         document.getElementById('hoverPing').classList.add('visible');
         document.getElementById('hoverThru').classList.add('visible');
         document.getElementById('hoverAvail').classList.add('visible');
         hoverTime.classList.add('visible');
+        // Expand extra columns
+        document.getElementById('valuesWeb').classList.add('expanded');
+        document.getElementById('valuesPing').classList.add('expanded');
+        document.getElementById('valuesThru').classList.add('expanded');
+        document.getElementById('valuesAvail').classList.add('expanded');
+        document.getElementById('colHeaders').classList.add('expanded');
       }
 
       function updateHover(pct, idx) {
@@ -749,7 +792,7 @@
         hoverTime.textContent = formatTime(secondsAgo);
       }
 
-      function hideHover() {
+      function hideHoverNow() {
         isHovering = false;
         hoverLines.forEach(id => {
           const el = document.getElementById(id);
@@ -760,31 +803,87 @@
         document.getElementById('hoverThru').classList.remove('visible');
         document.getElementById('hoverAvail').classList.remove('visible');
         hoverTime.classList.remove('visible');
+        // Collapse extra columns
+        document.getElementById('valuesWeb').classList.remove('expanded');
+        document.getElementById('valuesPing').classList.remove('expanded');
+        document.getElementById('valuesThru').classList.remove('expanded');
+        document.getElementById('valuesAvail').classList.remove('expanded');
+        document.getElementById('colHeaders').classList.remove('expanded');
       }
 
-      // Per-sparkline hover handling
-      sparkWraps.forEach(wrap => {
-        const canvas = wrap.querySelector('canvas');
-        canvas.addEventListener('mouseenter', () => {
+      function hideHover() {
+        // Debounce to prevent fighting when columns expand
+        if (hideTimeout) clearTimeout(hideTimeout);
+        hideTimeout = setTimeout(() => {
+          if (!isTouchExpanded) {
+            hideHoverNow();
+          }
+        }, 100);
+      }
+
+      // Row-level hover handling (prevents bounciness from column expansion)
+      const rows = document.querySelectorAll('.stacked-row');
+      rows.forEach(row => {
+        const wrap = row.querySelector('.spark-wrap');
+        const canvas = wrap ? wrap.querySelector('canvas') : null;
+
+        row.addEventListener('mouseenter', () => {
           if (!isHovering) {
             isHovering = true;
             showHoverElements();
           }
         });
-        canvas.addEventListener('mousemove', (e) => {
-          const rect = canvas.getBoundingClientRect();
-          const x = e.clientX - rect.left;
-          const pct = Math.max(0, Math.min(1, x / rect.width));
-          const idx = Math.min(29, Math.floor(pct * 30));
-          updateHover(pct, idx);
-        });
-        canvas.addEventListener('mouseleave', (e) => {
-          // Only hide if not entering another sparkline
+
+        row.addEventListener('mouseleave', (e) => {
           const toEl = e.relatedTarget;
-          if (!toEl || !toEl.closest('.spark-wrap')) {
+          if (!toEl || !toEl.closest('.stacked-row')) {
             hideHover();
           }
         });
+
+        if (canvas) {
+          canvas.addEventListener('mousemove', (e) => {
+            if (hideTimeout) {
+              clearTimeout(hideTimeout);
+              hideTimeout = null;
+            }
+            const rect = canvas.getBoundingClientRect();
+            const x = e.clientX - rect.left;
+            const pct = Math.max(0, Math.min(1, x / rect.width));
+            const idx = Math.min(29, Math.floor(pct * 30));
+            updateHover(pct, idx);
+          });
+
+          // Touch support: tap and drag to scrub
+          canvas.addEventListener('touchstart', (e) => {
+            e.preventDefault();
+            isHovering = true;
+            showHoverElements();
+            const touch = e.touches[0];
+            const rect = canvas.getBoundingClientRect();
+            const x = touch.clientX - rect.left;
+            const pct = Math.max(0, Math.min(1, x / rect.width));
+            const idx = Math.min(29, Math.floor(pct * 30));
+            updateHover(pct, idx);
+          }, { passive: false });
+
+          canvas.addEventListener('touchmove', (e) => {
+            e.preventDefault();
+            const touch = e.touches[0];
+            const rect = canvas.getBoundingClientRect();
+            const x = touch.clientX - rect.left;
+            const pct = Math.max(0, Math.min(1, x / rect.width));
+            const idx = Math.min(29, Math.floor(pct * 30));
+            updateHover(pct, idx);
+          }, { passive: false });
+
+          canvas.addEventListener('touchend', () => {
+            // Keep expanded for a moment, then collapse
+            setTimeout(() => {
+              hideHoverNow();
+            }, 1500);
+          });
+        }
       });
     }
 
