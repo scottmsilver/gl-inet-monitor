@@ -29,12 +29,40 @@
       border-bottom: 1px solid rgba(255,255,255,0.1);
       font-size: 13px;
     }
-    .stacked-header .status-dot {
-      width: 8px;
-      height: 8px;
-      border-radius: 50%;
+    .stacked-header .status-icon {
+      cursor: help;
+      position: relative;
+      display: flex;
+      align-items: center;
     }
-    .stacked-header .status-text { font-weight: 600; }
+    .stacked-header .status-icon svg {
+      display: block;
+    }
+    .stacked-header .status-icon::after {
+      content: attr(data-tooltip);
+      position: absolute;
+      left: 0;
+      top: 100%;
+      margin-top: 6px;
+      background: #1a1a2e;
+      border: 1px solid rgba(255,255,255,0.2);
+      padding: 6px 10px;
+      border-radius: 6px;
+      font-size: 11px;
+      white-space: nowrap;
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity 0.2s;
+      z-index: 100;
+      box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+    }
+    .stacked-header .status-icon:hover::after {
+      opacity: 1;
+      transition-delay: 0.4s;
+    }
+    .status-icon.good { color: #4ade80; }
+    .status-icon.warn { color: #facc15; }
+    .status-icon.bad { color: #f87171; }
     .stacked-header .ssid {
       color: #666;
       font-size: 11px;
@@ -322,8 +350,7 @@
 
   <div class="stacked-layout" id="mainLayout">
     <div class="stacked-header">
-      <div class="status-dot dot-good" id="stackStatusDot"></div>
-      <span class="status-text" id="stackStatusText">Online</span>
+      <div class="status-icon" id="statusIcon" title="">●</div>
       <span class="ssid" id="stackSsid">--</span>
       <span class="last-update" id="lastUpdate"></span>
       <span class="header-spacer"></span>
@@ -437,7 +464,15 @@
   </div>
 
   <script>
-    let state = { webHistory: [], pingHistory: [], txHistory: [], rxHistory: [], availHistory: [], interval: 5 };
+    let state = {
+      webHistory: [], pingHistory: [], txHistory: [], rxHistory: [], availHistory: [],
+      interval: 5,
+      uplink: null,
+      thresholds: {
+        ping: { good: 30, warn: 80 },
+        web: { good: 100, warn: 300 }  // ~3x ping for TCP+HTTP round trips
+      }
+    };
 
     // Track max column widths (grow only)
     let maxWidths = { now: 0, avg: 0, p99: 0, hover: 0 };
@@ -606,13 +641,13 @@
     function getColor(type, value) {
       if (value < 0) return '#666';
       if (type === 'web') {
-        if (value < 100) return '#4ade80';
-        if (value < 300) return '#facc15';
+        if (value < state.thresholds.web.good) return '#4ade80';
+        if (value < state.thresholds.web.warn) return '#facc15';
         return '#f87171';
       }
       if (type === 'ping') {
-        if (value < 30) return '#4ade80';
-        if (value < 80) return '#facc15';
+        if (value < state.thresholds.ping.good) return '#4ade80';
+        if (value < state.thresholds.ping.warn) return '#facc15';
         return '#f87171';
       }
       if (type === 'avail') {
@@ -626,13 +661,13 @@
     function getColorClass(type, value) {
       if (value < 0) return '';
       if (type === 'web') {
-        if (value < 100) return 'good';
-        if (value < 300) return 'warn';
+        if (value < state.thresholds.web.good) return 'good';
+        if (value < state.thresholds.web.warn) return 'warn';
         return 'bad';
       }
       if (type === 'ping') {
-        if (value < 30) return 'good';
-        if (value < 80) return 'warn';
+        if (value < state.thresholds.ping.good) return 'good';
+        if (value < state.thresholds.ping.warn) return 'warn';
         return 'bad';
       }
       if (type === 'avail') {
@@ -1088,12 +1123,55 @@
 
     function updateStatus(availHistory) {
       const pct = calcAvailPct(availHistory, 12);
-      let status, dotClass;
-      if (pct >= 99) { status = 'Online'; dotClass = 'dot-good'; }
-      else if (pct >= 80) { status = 'Degraded'; dotClass = 'dot-warn'; }
-      else { status = 'Offline'; dotClass = 'dot-bad'; }
-      document.getElementById('stackStatusText').textContent = status;
-      document.getElementById('stackStatusDot').className = 'status-dot ' + dotClass;
+      let status, statusClass;
+      if (pct >= 99) { status = 'Online'; statusClass = 'good'; }
+      else if (pct >= 80) { status = 'Degraded'; statusClass = 'warn'; }
+      else { status = 'Offline'; statusClass = 'bad'; }
+
+      // Icons for connection types (SVG line art)
+      const icons = {
+        airplane: `<svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round">
+          <path d="M2 12 L6 8"/>
+          <circle cx="5" cy="9" r="2.5"/>
+          <path d="M9 7 A4 4 0 0 1 9 3"/>
+          <path d="M11 8 A6 6 0 0 1 11 2"/>
+        </svg>`,
+        starlink: `<svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round">
+          <ellipse cx="7" cy="10" rx="5" ry="2"/>
+          <circle cx="7" cy="5" r="2"/>
+          <path d="M7 7 L7 8"/>
+        </svg>`,
+        geo_satellite: `<svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round">
+          <circle cx="7" cy="7" r="2"/>
+          <circle cx="7" cy="7" r="5"/>
+        </svg>`,
+        maritime: `<svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round">
+          <path d="M2 10 Q5 8 7 10 Q9 12 12 10"/>
+          <path d="M4 7 L7 3 L10 7 Z"/>
+        </svg>`,
+        cellular: `<svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round">
+          <path d="M3 11 L3 9"/>
+          <path d="M6 11 L6 7"/>
+          <path d="M9 11 L9 5"/>
+          <path d="M12 11 L12 3"/>
+        </svg>`,
+        landline: `<svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round">
+          <circle cx="7" cy="7" r="3"/>
+        </svg>`
+      };
+      const labels = {
+        airplane: 'Airplane WiFi', starlink: 'Starlink', geo_satellite: 'Satellite',
+        maritime: 'Maritime', cellular: 'Cellular', landline: 'Landline'
+      };
+
+      const connType = state.uplink?.connection_type || 'landline';
+      const connLabel = labels[connType] || connType;
+      const isp = state.uplink?.isp || '';
+
+      const iconEl = document.getElementById('statusIcon');
+      iconEl.innerHTML = icons[connType] || icons.landline;
+      iconEl.className = 'status-icon ' + statusClass;
+      iconEl.setAttribute('data-tooltip', `${status} · ${connLabel}${isp ? ' (' + isp + ')' : ''}`);
     }
 
     async function fetchData() {
@@ -1101,6 +1179,13 @@
         const res = await fetch('/data.json?' + Date.now());
         const data = await res.json();
         state.interval = data.interval || 5;
+
+        // Update thresholds from uplink detection
+        if (data.uplink?.thresholds) {
+          state.uplink = data.uplink;
+          state.thresholds.ping = data.uplink.thresholds.ping;
+          state.thresholds.web = data.uplink.thresholds.web;
+        }
 
         state.webHistory = data.web?.history || [];
         state.pingHistory = (data.ping?.history || []).filter(v => v > 0);
@@ -1127,6 +1212,7 @@
         const avail10m = calcAvailPct(state.availHistory, 120);
 
         document.getElementById('stackSsid').textContent = data.uplink_ssid || '--';
+
         const now = new Date();
         document.getElementById('lastUpdate').textContent = now.getHours() + ':' + now.getMinutes().toString().padStart(2,'0') + ':' + now.getSeconds().toString().padStart(2,'0');
 

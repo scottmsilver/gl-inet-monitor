@@ -12,6 +12,129 @@ IW_CACHE="/tmp/iw_stats_cache"
 PID_FILE="/tmp/dash_daemon.pid"
 AVAIL_LOG="/tmp/avail_history.log"
 LAST_SUCCESS_FILE="/tmp/last_success.txt"
+UPLINK_CACHE="/tmp/uplink_cache.json"
+UPLINK_DETECT_INTERVAL=60  # Re-detect every 60 samples (5 min at 5s interval)
+UPLINK_SAMPLE_COUNT=0
+
+# --- Uplink Detection Functions ---
+
+get_external_ip() {
+  curl -s --max-time 5 https://api.ipify.org 2>/dev/null || \
+  curl -s --max-time 5 https://ifconfig.me 2>/dev/null || \
+  curl -s --max-time 5 https://ipinfo.io/ip 2>/dev/null
+}
+
+lookup_asn() {
+  local ip="$1"
+  curl -s --max-time 5 "http://ip-api.com/json/${ip}?fields=status,isp,org,as,query" 2>/dev/null
+}
+
+classify_by_asn_number() {
+  local as_field="$1"
+  local asn=$(echo "$as_field" | grep -oE 'AS[0-9]+' | sed 's/AS//')
+  [ -z "$asn" ] && return 1
+
+  case "$asn" in
+    14593) echo "starlink"; return 0 ;;
+    21928|393960) echo "airplane"; return 0 ;;
+    18747|64294) echo "airplane"; return 0 ;;
+    50973|22351) echo "airplane"; return 0 ;;
+    7155|16491|40306|40311|46536) echo "geo_satellite"; return 0 ;;
+    1358|6621|63062) echo "geo_satellite"; return 0 ;;
+    35228) echo "geo_satellite"; return 0 ;;
+    15146|26415) echo "maritime"; return 0 ;;
+  esac
+  return 1
+}
+
+classify_connection() {
+  local asn_info="$1"
+  local as_field=$(echo "$asn_info" | grep -o '"as":"[^"]*"' | cut -d'"' -f4)
+
+  local result=$(classify_by_asn_number "$as_field")
+  if [ -n "$result" ]; then
+    echo "$result"
+    return
+  fi
+
+  local info_upper=$(echo "$asn_info" | tr '[:lower:]' '[:upper:]')
+
+  if echo "$info_upper" | grep -qE 'STARLINK|SPACEX'; then
+    echo "starlink"; return
+  fi
+  if echo "$info_upper" | grep -qE 'GOGO|GO-GO|PANASONIC.*AVIONIC|INMARSAT|VIASAT.*AIRLINE|ANUVU|THALES|SMARTSKY|GLOBAL EAGLE'; then
+    echo "airplane"; return
+  fi
+  if echo "$info_upper" | grep -qE 'VIASAT|HUGHESNET|ECHOSTAR|EUTELSAT|SES S\.A|TELESAT|SKYTERRA'; then
+    echo "geo_satellite"; return
+  fi
+  if echo "$info_upper" | grep -qE 'MARITIME|MARLINK|KVH|SPEEDCAST'; then
+    echo "maritime"; return
+  fi
+  if echo "$info_upper" | grep -qE 'T-MOBILE|VERIZON WIRELESS|AT&T MOBILITY|CELLULAR|LTE|5G'; then
+    echo "cellular"; return
+  fi
+  echo "landline"
+}
+
+get_thresholds() {
+  local conn_type="$1"
+  # Format: ping_good ping_warn web_good web_warn
+  # Web thresholds ~3x ping (TCP handshake + HTTP round trips)
+  case "$conn_type" in
+    starlink) echo "60 120 200 400" ;;
+    airplane|geo_satellite|maritime) echo "700 1000 2000 3500" ;;
+    cellular) echo "80 150 250 500" ;;
+    *) echo "30 80 100 300" ;;
+  esac
+}
+
+detect_uplink() {
+  # Check if we have a valid cache
+  if [ -f "$UPLINK_CACHE" ] && [ $UPLINK_SAMPLE_COUNT -lt $UPLINK_DETECT_INTERVAL ]; then
+    UPLINK_SAMPLE_COUNT=$((UPLINK_SAMPLE_COUNT + 1))
+    return 0
+  fi
+
+  log "Detecting uplink type..."
+  UPLINK_SAMPLE_COUNT=0
+
+  local ext_ip=$(get_external_ip)
+  if [ -z "$ext_ip" ]; then
+    log "Could not get external IP, using defaults"
+    # Write default cache (landline defaults)
+    cat > "$UPLINK_CACHE" << CACHE
+{"connection_type":"unknown","isp":"Unknown","thresholds":{"ping":{"good":30,"warn":80},"web":{"good":100,"warn":300}}}
+CACHE
+    return 1
+  fi
+
+  local asn_info=$(lookup_asn "$ext_ip")
+  if [ -z "$asn_info" ]; then
+    log "Could not lookup ASN, using defaults"
+    cat > "$UPLINK_CACHE" << CACHE
+{"connection_type":"unknown","isp":"Unknown","thresholds":{"ping":{"good":30,"warn":80},"web":{"good":100,"warn":300}}}
+CACHE
+    return 1
+  fi
+
+  local conn_type=$(classify_connection "$asn_info")
+  local thresholds=$(get_thresholds "$conn_type")
+  local ping_good=$(echo "$thresholds" | cut -d' ' -f1)
+  local ping_warn=$(echo "$thresholds" | cut -d' ' -f2)
+  local web_good=$(echo "$thresholds" | cut -d' ' -f3)
+  local web_warn=$(echo "$thresholds" | cut -d' ' -f4)
+
+  local isp=$(echo "$asn_info" | grep -o '"isp":"[^"]*"' | cut -d'"' -f4)
+  [ -z "$isp" ] && isp="Unknown"
+
+  cat > "$UPLINK_CACHE" << CACHE
+{"connection_type":"$conn_type","isp":"$isp","thresholds":{"ping":{"good":$ping_good,"warn":$ping_warn},"web":{"good":$web_good,"warn":$web_warn}}}
+CACHE
+
+  log "Uplink detected: $conn_type ($isp)"
+  return 0
+}
 
 # Write PID file
 echo $$ > "$PID_FILE"
@@ -39,6 +162,10 @@ get_uplink_ssid() {
 
 collect_data() {
     NOW=$(date +%s)
+
+    # --- Detect uplink type (cached, refreshes every 5 min) ---
+    detect_uplink
+    UPLINK_JSON=$(cat "$UPLINK_CACHE" 2>/dev/null || echo '{"connection_type":"landline","isp":"Unknown","thresholds":{"ping":{"good":30,"warn":80},"web":{"good":100,"warn":300}}}')
 
     # --- Web Verify ---
     read UP1 _ < /proc/uptime
@@ -160,6 +287,7 @@ collect_data() {
   "ts": $NOW,
   "interval": $INTERVAL,
   "uplink_ssid": "$UPLINK_SSID",
+  "uplink": $UPLINK_JSON,
   "web": {"code": $WEB_CODE, "ms": $WEB_MS, "history": [$FETCH_HIST]},
   "ping": {"current": $PING_MS, "history": [$PING_HIST]},
   "throughput": {
