@@ -152,11 +152,13 @@ log() {
 
 get_uplink_ssid() {
     # Try sta0/sta1 first (repeater uplink interfaces)
-    SSID=$(iwinfo sta0 info 2>/dev/null | grep -i 'ESSID:' | sed 's/.*ESSID: "\([^"]*\)".*/\1/')
-    [ -z "$SSID" ] && SSID=$(iwinfo sta1 info 2>/dev/null | grep -i 'ESSID:' | sed 's/.*ESSID: "\([^"]*\)".*/\1/')
+    # Handle both quoted ("SSID") and unquoted (unknown) formats
+    SSID=$(iwinfo sta0 info 2>/dev/null | awk -F'ESSID: ' '/ESSID:/{gsub(/"/, "", $2); print $2}')
+    [ -z "$SSID" ] || [ "$SSID" = "unknown" ] && \
+        SSID=$(iwinfo sta1 info 2>/dev/null | awk -F'ESSID: ' '/ESSID:/{gsub(/"/, "", $2); print $2}')
     # Fallback to UCI config
-    [ -z "$SSID" ] && SSID=$(uci get wireless.sta.ssid 2>/dev/null)
-    [ -z "$SSID" ] && SSID="Unknown Network"
+    [ -z "$SSID" ] || [ "$SSID" = "unknown" ] && SSID=$(uci get wireless.sta.ssid 2>/dev/null)
+    [ -z "$SSID" ] || [ "$SSID" = "unknown" ] && SSID="Not connected"
     echo "$SSID"
 }
 
