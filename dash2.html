@@ -58,22 +58,25 @@
       margin-left: -8px;
     }
     .stacked-header .col-headers span {
-      width: 44px;
       text-align: right;
       font-size: 10px;
       color: #666;
       text-transform: uppercase;
+      font-variant-numeric: tabular-nums;
+      white-space: nowrap;
+      min-width: var(--col-now-width, 40px);
+      padding-left: 6px;
     }
     .stacked-header .col-headers .col-extra {
-      width: 0;
       max-width: 0;
+      min-width: 0;
       overflow: hidden;
       opacity: 0;
-      transition: width 0.15s, max-width 0.15s, opacity 0.15s;
+      transition: max-width 0.15s, opacity 0.15s, min-width 0.15s;
     }
     .stacked-header .col-headers.expanded .col-extra {
-      width: 44px;
-      max-width: 44px;
+      max-width: var(--col-extra-width, 60px);
+      min-width: var(--col-extra-width, 60px);
       opacity: 1;
     }
     .stacked-header .hover-time {
@@ -151,19 +154,25 @@
       font-size: 12px;
       flex-shrink: 0;
       margin-left: -8px;
+      min-width: var(--values-total-width, 50px);
     }
     .stacked-row .values .col {
-      width: 44px;
       text-align: right;
+      font-variant-numeric: tabular-nums;
+      white-space: nowrap;
+      min-width: var(--col-now-width, 40px);
+      padding-left: 6px;
     }
     .stacked-row .values .col-extra {
       max-width: 0;
+      min-width: 0;
       overflow: hidden;
       opacity: 0;
-      transition: max-width 0.15s, opacity 0.15s;
+      transition: max-width 0.15s, opacity 0.15s, min-width 0.15s;
     }
     .stacked-row .values.expanded .col-extra {
-      max-width: 44px;
+      max-width: var(--col-extra-width, 60px);
+      min-width: var(--col-extra-width, 60px);
       opacity: 1;
     }
 
@@ -173,15 +182,16 @@
       font-size: 11px;
       color: #a78bfa;
       max-width: 0;
+      min-width: 0;
       overflow: hidden;
       text-align: right;
       flex-shrink: 0;
       opacity: 0;
       white-space: nowrap;
       margin-left: 0;
-      transition: max-width 0.15s, opacity 0.15s, margin-left 0.15s;
+      transition: max-width 0.15s, opacity 0.15s, margin-left 0.15s, min-width 0.15s;
     }
-    .hover-val.visible { max-width: 50px; opacity: 1; margin-left: 6px; }
+    .hover-val.visible { max-width: var(--col-hover-width, 50px); min-width: var(--col-hover-width, 50px); opacity: 1; margin-left: 6px; }
 
     /* Throughput row */
     .thru-values {
@@ -192,27 +202,34 @@
       line-height: 1.2;
       flex-shrink: 0;
       margin-left: -8px;
+      min-width: var(--values-total-width, 50px);
     }
     .thru-values .thru-line {
       display: flex;
     }
     .thru-values .col {
-      width: 44px;
       text-align: right;
+      font-variant-numeric: tabular-nums;
+      white-space: nowrap;
+      padding-left: 6px;
     }
     .thru-values .col-extra {
       max-width: 0;
+      min-width: 0;
       overflow: hidden;
       opacity: 0;
-      transition: max-width 0.15s, opacity 0.15s;
+      transition: max-width 0.15s, opacity 0.15s, min-width 0.15s;
     }
     .thru-values.expanded .col-extra {
-      max-width: 44px;
+      max-width: var(--col-extra-width, 60px);
+      min-width: var(--col-extra-width, 60px);
       opacity: 1;
     }
     .thru-values .col-now {
-      width: 44px;
       text-align: right;
+      font-variant-numeric: tabular-nums;
+      white-space: nowrap;
+      min-width: var(--col-now-width, 40px);
     }
     .thru-values .col-now .arrow {
       font-size: 9px;
@@ -229,15 +246,16 @@
       font-size: 10px;
       line-height: 1.2;
       max-width: 0;
+      min-width: 0;
       overflow: hidden;
       flex-shrink: 0;
       color: #a78bfa;
       opacity: 0;
       white-space: nowrap;
       margin-left: 0;
-      transition: max-width 0.15s, opacity 0.15s, margin-left 0.15s;
+      transition: max-width 0.15s, opacity 0.15s, margin-left 0.15s, min-width 0.15s;
     }
-    .thru-hover.visible { max-width: 50px; opacity: 1; margin-left: 6px; }
+    .thru-hover.visible { max-width: var(--col-hover-width, 50px); min-width: var(--col-hover-width, 50px); opacity: 1; margin-left: 6px; }
     .thru-hover span { text-align: right; }
 
     /* Detail Panel */
@@ -420,6 +438,107 @@
 
   <script>
     let state = { webHistory: [], pingHistory: [], txHistory: [], rxHistory: [], availHistory: [], interval: 5 };
+
+    // Track max column widths (grow only)
+    let maxWidths = { now: 0, avg: 0, p99: 0, hover: 0 };
+
+    // Measure text width using canvas
+    const measureCanvas = document.createElement('canvas');
+    const measureCtx = measureCanvas.getContext('2d');
+
+    function measureText(text, font) {
+      measureCtx.font = font;
+      return measureCtx.measureText(text).width;
+    }
+
+    function updateColumnWidths() {
+      const font = '12px "SF Mono", Monaco, "Courier New", monospace';
+      const fontSmall = '10px "SF Mono", Monaco, "Courier New", monospace';
+      const padding = 4;
+
+      // Collect all "now" column elements
+      const nowEls = [
+        document.getElementById('stackWebNow'),
+        document.getElementById('stackPingNow'),
+        document.getElementById('stackAvailNow')
+      ];
+      // Thru now values
+      const thruNowEls = [
+        document.getElementById('stackThruDownNow'),
+        document.getElementById('stackThruUpNow')
+      ];
+      // Avg (1m) columns
+      const avgEls = [
+        document.getElementById('stackWeb1m'),
+        document.getElementById('stackPing1m'),
+        document.getElementById('stackThruDown1m'),
+        document.getElementById('stackThruUp1m'),
+        document.getElementById('stackAvail1m')
+      ];
+      // P99/Peak columns
+      const p99Els = [
+        document.getElementById('stackWebP99'),
+        document.getElementById('stackPingP99'),
+        document.getElementById('stackThruDownPk'),
+        document.getElementById('stackThruUpPk'),
+        document.getElementById('stackAvail10m')
+      ];
+
+      // Measure and update max widths
+      nowEls.forEach(el => {
+        if (el) {
+          const w = measureText(el.textContent, font) + padding;
+          if (w > maxWidths.now) maxWidths.now = w;
+        }
+      });
+      thruNowEls.forEach(el => {
+        if (el) {
+          const w = measureText(el.textContent, fontSmall) + padding + 10; // extra for arrow
+          if (w > maxWidths.now) maxWidths.now = w;
+        }
+      });
+      avgEls.forEach(el => {
+        if (el) {
+          const f = el.closest('.thru-values') ? fontSmall : font;
+          const w = measureText(el.textContent, f) + padding;
+          if (w > maxWidths.avg) maxWidths.avg = w;
+        }
+      });
+      p99Els.forEach(el => {
+        if (el) {
+          const f = el.closest('.thru-values') ? fontSmall : font;
+          const w = measureText(el.textContent, f) + padding;
+          if (w > maxWidths.p99) maxWidths.p99 = w;
+        }
+      });
+
+      // Apply widths via CSS custom properties on root element (so all rows share same widths)
+      const root = document.documentElement;
+      const extraWidth = Math.max(maxWidths.avg, maxWidths.p99);
+      root.style.setProperty('--col-now-width', maxWidths.now + 'px');
+      root.style.setProperty('--col-extra-width', extraWidth + 'px');
+      // Total values width for consistent sparkline alignment
+      root.style.setProperty('--values-total-width', (maxWidths.now + 12) + 'px'); // now + padding
+
+      // Hover values - measure current hover vals
+      const hoverEls = ['hoverWeb', 'hoverPing', 'hoverAvail'];
+      hoverEls.forEach(id => {
+        const el = document.getElementById(id);
+        if (el && el.textContent && el.textContent !== '--') {
+          const w = measureText(el.textContent, '11px "SF Mono", Monaco, monospace') + padding;
+          if (w > maxWidths.hover) maxWidths.hover = w;
+        }
+      });
+      // Also measure thru hover values
+      ['hoverThruDown', 'hoverThruUp'].forEach(id => {
+        const el = document.getElementById(id);
+        if (el && el.textContent && el.textContent !== '--') {
+          const w = measureText(el.textContent, '10px "SF Mono", Monaco, monospace') + padding;
+          if (w > maxWidths.hover) maxWidths.hover = w;
+        }
+      });
+      root.style.setProperty('--col-hover-width', maxWidths.hover + 'px');
+    }
 
     function formatMsAligned(v) {
       if (v < 0) return '  --';
@@ -1047,6 +1166,7 @@
         });
 
         updateStatus(state.availHistory);
+        updateColumnWidths();
       } catch (e) {
         console.error('Fetch error:', e);
       }
