@@ -353,6 +353,58 @@
     }
     .detail-wrap .detail-hover-time.visible { opacity: 1; }
 
+    /* Clients Panel */
+    .clients-panel {
+      display: none;
+      max-height: 200px;
+      overflow-y: auto;
+      background: #1e1e36;
+      border-bottom: 1px solid rgba(255,255,255,0.1);
+    }
+    .clients-panel.open { display: block; }
+    .client-row {
+      display: flex;
+      align-items: center;
+      padding: 6px 14px;
+      font-size: 11px;
+      border-bottom: 1px solid rgba(255,255,255,0.05);
+    }
+    .client-row:last-child { border-bottom: none; }
+    .client-name {
+      flex: 1;
+      color: #eee;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      max-width: 140px;
+    }
+    .client-name.private { color: #888; font-style: italic; }
+    .client-iface {
+      font-size: 9px;
+      padding: 1px 4px;
+      background: rgba(255,255,255,0.1);
+      border-radius: 3px;
+      margin-right: 8px;
+      color: #888;
+    }
+    .client-iface.wifi-5g { color: #60a5fa; background: rgba(96,165,250,0.15); }
+    .client-iface.wifi-24g { color: #a78bfa; background: rgba(167,139,250,0.15); }
+    .client-bandwidth {
+      font-family: 'SF Mono', Monaco, 'Courier New', monospace;
+      font-size: 10px;
+      color: #888;
+      text-align: right;
+      min-width: 80px;
+    }
+    .client-bandwidth .down { color: #4ade80; }
+    .client-bandwidth .up { color: #60a5fa; }
+    .clients-empty {
+      padding: 12px 14px;
+      color: #666;
+      font-size: 11px;
+      text-align: center;
+    }
+
     /* Colors */
     .good { color: #4ade80; }
     .warn { color: #facc15; }
@@ -496,11 +548,29 @@
         <span class="detail-hover-time" id="hoverTimeAvailDetail"></span>
       </div>
     </div>
+
+    <div class="stacked-row" onclick="toggleClientsPanel()">
+      <span class="label">Users</span>
+      <div class="spark-wrap" data-type="clients">
+        <canvas class="sparkline" id="stackSparkClients"></canvas>
+        <span class="y-max" id="yMaxClients"></span>
+        <div class="hover-line" id="hoverLineClients"></div>
+      </div>
+      <span class="hover-val" id="hoverClients">--</span>
+      <div class="values" id="valuesClients">
+        <span class="col" id="stackClientsNow">--</span>
+        <span class="col col-extra" id="stackClientsBw">--</span>
+      </div>
+    </div>
+    <div class="clients-panel" id="clientsPanel">
+      <div id="clientsList"></div>
+    </div>
   </div>
 
   <script>
     let state = {
-      webHistory: [], pingHistory: [], txHistory: [], rxHistory: [], availHistory: [],
+      webHistory: [], pingHistory: [], txHistory: [], rxHistory: [], availHistory: [], clientsHistory: [],
+      clientsList: [],
       interval: 5,
       uplink: null,
       thresholds: {
@@ -931,7 +1001,7 @@
     function setupHover() {
       const layout = document.getElementById('mainLayout');
       const sparkWraps = document.querySelectorAll('.spark-wrap');
-      const hoverLines = ['hoverLineWeb', 'hoverLinePing', 'hoverLineThru', 'hoverLineAvail'];
+      const hoverLines = ['hoverLineWeb', 'hoverLinePing', 'hoverLineThru', 'hoverLineAvail', 'hoverLineClients'];
       const hoverTime = document.getElementById('hoverTime');
       let isHovering = false;
       let hideTimeout = null;
@@ -946,12 +1016,14 @@
         document.getElementById('hoverPing').classList.add('visible');
         document.getElementById('hoverThru').classList.add('visible');
         document.getElementById('hoverAvail').classList.add('visible');
+        document.getElementById('hoverClients').classList.add('visible');
         hoverTime.classList.add('visible');
         // Expand extra columns
         document.getElementById('valuesWeb').classList.add('expanded');
         document.getElementById('valuesPing').classList.add('expanded');
         document.getElementById('valuesThru').classList.add('expanded');
         document.getElementById('valuesAvail').classList.add('expanded');
+        document.getElementById('valuesClients').classList.add('expanded');
         document.getElementById('colHeaders').classList.add('expanded');
       }
 
@@ -969,12 +1041,14 @@
         const txSamples = state.txHistory.slice(-30);
         const rxSamples = state.rxHistory.slice(-30);
         const availSamples = state.availHistory.slice(-30);
+        const clientsSamples = state.clientsHistory.slice(-30);
 
         document.getElementById('hoverWeb').textContent = webSamples[idx] !== undefined ? formatMsShort(webSamples[idx]) : '--';
         document.getElementById('hoverPing').textContent = pingSamples[idx] !== undefined ? formatMsShort(pingSamples[idx]) : '--';
         document.getElementById('hoverThruDown').textContent = txSamples[idx] !== undefined ? formatSpeedShort(txSamples[idx]) : '--';
         document.getElementById('hoverThruUp').textContent = rxSamples[idx] !== undefined ? formatSpeedShort(rxSamples[idx]) : '--';
         document.getElementById('hoverAvail').textContent = availSamples[idx] !== undefined ? (availSamples[idx] === 1 ? 'OK' : 'FAIL') : '--';
+        document.getElementById('hoverClients').textContent = clientsSamples[idx] !== undefined ? clientsSamples[idx] : '--';
 
         const samplesAgo = 29 - idx;
         const secondsAgo = samplesAgo * state.interval;
@@ -991,12 +1065,14 @@
         document.getElementById('hoverPing').classList.remove('visible');
         document.getElementById('hoverThru').classList.remove('visible');
         document.getElementById('hoverAvail').classList.remove('visible');
+        document.getElementById('hoverClients').classList.remove('visible');
         hoverTime.classList.remove('visible');
         // Collapse extra columns
         document.getElementById('valuesWeb').classList.remove('expanded');
         document.getElementById('valuesPing').classList.remove('expanded');
         document.getElementById('valuesThru').classList.remove('expanded');
         document.getElementById('valuesAvail').classList.remove('expanded');
+        document.getElementById('valuesClients').classList.remove('expanded');
         document.getElementById('colHeaders').classList.remove('expanded');
       }
 
@@ -1133,12 +1209,68 @@
           if (hoverVal) hoverVal.classList.remove('visible');
           if (hoverTime) hoverTime.classList.remove('visible');
         });
+
+        // Touch support for detail graphs
+        function handleDetailTouch(e) {
+          e.preventDefault();
+          const touch = e.touches[0];
+          const rect = canvas.getBoundingClientRect();
+          const x = touch.clientX - rect.left;
+          const pct = Math.max(0, Math.min(1, x / rect.width));
+
+          let data, len;
+          if (type === 'web') data = state.webHistory;
+          else if (type === 'ping') data = state.pingHistory;
+          else if (type === 'thru') { data = state.txHistory; }
+          else if (type === 'avail') data = state.availHistory;
+
+          len = data ? data.length : 0;
+          const idx = Math.min(len - 1, Math.floor(pct * len));
+
+          if (hoverLine) {
+            hoverLine.style.display = 'block';
+            hoverLine.style.left = (pct * 100) + '%';
+          }
+
+          if (hoverVal && data && idx >= 0) {
+            let val = data[idx];
+            if (type === 'web' || type === 'ping') {
+              hoverVal.textContent = formatMsShort(val);
+            } else if (type === 'thru') {
+              const rxVal = state.rxHistory[idx] || 0;
+              hoverVal.textContent = '↓' + formatSpeedShort(val) + ' ↑' + formatSpeedShort(rxVal);
+            } else if (type === 'avail') {
+              hoverVal.textContent = val === 1 ? 'OK' : 'FAIL';
+            }
+            hoverVal.classList.add('visible');
+          }
+
+          if (hoverTime && len > 0) {
+            const samplesAgo = len - 1 - idx;
+            const secondsAgo = samplesAgo * state.interval;
+            hoverTime.textContent = formatTime(secondsAgo);
+            hoverTime.classList.add('visible');
+          }
+        }
+
+        canvas.addEventListener('touchstart', handleDetailTouch, { passive: false });
+        canvas.addEventListener('touchmove', handleDetailTouch, { passive: false });
+        canvas.addEventListener('touchend', () => {
+          setTimeout(() => {
+            if (hoverLine) hoverLine.style.display = 'none';
+            if (hoverVal) hoverVal.classList.remove('visible');
+            if (hoverTime) hoverTime.classList.remove('visible');
+          }, 1500);
+        });
       });
     }
 
     function toggleDetail(id) {
       const panel = document.getElementById(id + '-detail');
       if (!panel) return;
+
+      // Close clients panel when opening a detail panel
+      document.getElementById('clientsPanel').classList.remove('open');
 
       document.querySelectorAll('.detail-panel').forEach(p => {
         if (p.id !== id + '-detail') p.classList.remove('open');
@@ -1153,6 +1285,64 @@
           else if (id.includes('thru')) drawSparklineDual('stack-thru-graph', state.txHistory, state.rxHistory, 'yMaxThruDetail');
           else if (id.includes('avail')) drawDetailAvail('stack-avail-graph', state.availHistory);
         }, 10);
+      }
+    }
+
+    function toggleClientsPanel() {
+      // Close all detail panels
+      document.querySelectorAll('.detail-panel').forEach(p => p.classList.remove('open'));
+      // Toggle clients panel
+      document.getElementById('clientsPanel').classList.toggle('open');
+    }
+
+    function formatBandwidth(kbps) {
+      if (kbps >= 1000) return (kbps / 1000).toFixed(1) + 'M';
+      return kbps + 'K';
+    }
+
+    function escapeHtml(text) {
+      const div = document.createElement('div');
+      div.textContent = text;
+      return div.innerHTML;
+    }
+
+    function updateClients(data) {
+      if (!data.clients) return;
+
+      // Update state
+      state.clientsHistory = data.clients.history || [];
+      state.clientsList = data.clients.list || [];
+
+      // Update summary row
+      const count = data.clients.online || 0;
+      document.getElementById('stackClientsNow').textContent = count + (count === 1 ? ' user' : ' users');
+
+      const totalBw = (data.clients.total_tx || 0) + (data.clients.total_rx || 0);
+      document.getElementById('stackClientsBw').textContent =
+        '↓' + formatBandwidth(data.clients.total_tx || 0) + ' ↑' + formatBandwidth(data.clients.total_rx || 0);
+
+      // Draw sparkline
+      drawSparkline('stackSparkClients', state.clientsHistory, '#a78bfa', 'yMaxClients', false);
+
+      // Update client list
+      const listEl = document.getElementById('clientsList');
+      if (state.clientsList.length === 0) {
+        listEl.innerHTML = '<div class="clients-empty">No clients connected</div>';
+      } else {
+        listEl.innerHTML = state.clientsList.map(c => {
+          const isPrivate = c.name === 'Private Device' || c.name.match(/^[0-9A-F]{2}:[0-9A-F]{2}:[0-9A-F]{2}$/i);
+          const ifaceClass = c.iface === '5G' ? 'wifi-5g' : 'wifi-24g';
+          return `
+            <div class="client-row">
+              <span class="client-name${isPrivate ? ' private' : ''}">${escapeHtml(c.name)}</span>
+              <span class="client-iface ${ifaceClass}">${c.iface}</span>
+              <span class="client-bandwidth">
+                <span class="down">↓${formatBandwidth(c.tx)}</span>
+                <span class="up">↑${formatBandwidth(c.rx)}</span>
+              </span>
+            </div>
+          `;
+        }).join('');
       }
     }
 
@@ -1336,6 +1526,7 @@
         });
 
         updateStatus(state.availHistory);
+        updateClients(data);
         updateColumnWidths();
       } catch (e) {
         console.error('Fetch error:', e);

@@ -15,6 +15,7 @@ LAST_SUCCESS_FILE="/tmp/last_success.txt"
 UPLINK_CACHE="/tmp/uplink_cache.json"
 UPLINK_DETECT_INTERVAL=60  # Re-detect every 60 samples (5 min at 5s interval)
 UPLINK_SAMPLE_COUNT=0
+CLIENTS_LOG="/tmp/clients_history.log"
 
 # --- Uplink Detection Functions ---
 
@@ -136,6 +137,88 @@ CACHE
   return 0
 }
 
+# --- Client Data Collection Functions ---
+
+# Collect client data using jsonfilter (available on OpenWrt)
+collect_clients() {
+  # Refresh LuCI hints cache occasionally (every 60 seconds)
+  local hints_cache="/tmp/luci_hints.cache"
+  local hints_age=9999
+  if [ -f "$hints_cache" ]; then
+    local cache_mtime=$(stat -c %Y "$hints_cache" 2>/dev/null || stat -f %m "$hints_cache" 2>/dev/null || echo 0)
+    hints_age=$(($(date +%s) - cache_mtime))
+  fi
+  if [ $hints_age -gt 60 ]; then
+    ubus call luci-rpc getHostHints '{}' > "$hints_cache" 2>/dev/null
+  fi
+
+  # Get gl-clients data
+  local clients_raw=$(ubus call gl-clients list '{}' 2>/dev/null)
+  [ -z "$clients_raw" ] && clients_raw='{"clients":{}}'
+
+  # Use jsonfilter to extract client data
+  local macs=$(echo "$clients_raw" | jsonfilter -e '@.clients[*].mac' 2>/dev/null)
+
+  CLIENTS_ONLINE=0
+  CLIENTS_TOTAL_TX=0
+  CLIENTS_TOTAL_RX=0
+  CLIENTS_JSON=""
+  local first=1
+
+  for mac in $macs; do
+    # Get client data using jsonfilter
+    local online=$(echo "$clients_raw" | jsonfilter -e "@.clients[\"$mac\"].online" 2>/dev/null)
+    [ "$online" != "true" ] && continue
+
+    local ip=$(echo "$clients_raw" | jsonfilter -e "@.clients[\"$mac\"].ip" 2>/dev/null)
+    local iface=$(echo "$clients_raw" | jsonfilter -e "@.clients[\"$mac\"].iface" 2>/dev/null)
+    local tx=$(echo "$clients_raw" | jsonfilter -e "@.clients[\"$mac\"].tx" 2>/dev/null)
+    local rx=$(echo "$clients_raw" | jsonfilter -e "@.clients[\"$mac\"].rx" 2>/dev/null)
+    local gl_name=$(echo "$clients_raw" | jsonfilter -e "@.clients[\"$mac\"].name" 2>/dev/null)
+
+    # Convert bytes/sec to kbps
+    tx=$((${tx:-0} * 8 / 1000))
+    rx=$((${rx:-0} * 8 / 1000))
+
+    # Resolve name
+    local name=""
+    # 1. Use gl-clients name if available
+    if [ -n "$gl_name" ] && [ "$gl_name" != "" ]; then
+      name="$gl_name"
+    fi
+    # 2. Check DHCP leases
+    if [ -z "$name" ] && [ -f /tmp/dhcp.leases ]; then
+      local mac_lower=$(echo "$mac" | tr '[:upper:]' '[:lower:]')
+      name=$(awk -v m="$mac_lower" 'tolower($2)==m && $4!="*" {print $4}' /tmp/dhcp.leases)
+    fi
+    # 3. Check if random MAC (locally administered)
+    if [ -z "$name" ]; then
+      local first_byte=$(echo "$mac" | cut -d: -f1)
+      local dec=$(printf "%d" "0x$first_byte" 2>/dev/null || echo 0)
+      if [ $((dec & 2)) -ne 0 ]; then
+        name="Private Device"
+      fi
+    fi
+    # 4. Fallback to truncated MAC
+    [ -z "$name" ] && name=$(echo "$mac" | cut -d: -f1-3)
+
+    # Build JSON
+    CLIENTS_ONLINE=$((CLIENTS_ONLINE + 1))
+    CLIENTS_TOTAL_TX=$((CLIENTS_TOTAL_TX + tx))
+    CLIENTS_TOTAL_RX=$((CLIENTS_TOTAL_RX + rx))
+
+    [ $first -eq 0 ] && CLIENTS_JSON="${CLIENTS_JSON},"
+    first=0
+    CLIENTS_JSON="${CLIENTS_JSON}{\"mac\":\"$mac\",\"name\":\"$name\",\"ip\":\"$ip\",\"iface\":\"$iface\",\"tx\":$tx,\"rx\":$rx}"
+  done
+
+  # Update history
+  echo "$CLIENTS_ONLINE" >> "$CLIENTS_LOG"
+  tail -n $MAX_HISTORY "$CLIENTS_LOG" > "${CLIENTS_LOG}.tmp" && mv "${CLIENTS_LOG}.tmp" "$CLIENTS_LOG"
+  CLIENTS_HIST=$(cat "$CLIENTS_LOG" | tr '\n' ',' | sed 's/,$//')
+  [ -z "$CLIENTS_HIST" ] && CLIENTS_HIST="0"
+}
+
 # Write PID file
 echo $$ > "$PID_FILE"
 
@@ -144,6 +227,7 @@ echo $$ > "$PID_FILE"
 [ -f "$PING_LOG" ] || touch "$PING_LOG"
 [ -f "$THRU_LOG" ] || touch "$THRU_LOG"
 [ -f "$AVAIL_LOG" ] || touch "$AVAIL_LOG"
+[ -f "$CLIENTS_LOG" ] || touch "$CLIENTS_LOG"
 [ -f "$LAST_SUCCESS_FILE" ] || echo "0" > "$LAST_SUCCESS_FILE"
 
 log() {
@@ -283,6 +367,9 @@ collect_data() {
 
     read LAST_SUCCESS < "$LAST_SUCCESS_FILE" 2>/dev/null || LAST_SUCCESS=0
 
+    # --- Collect client data ---
+    collect_clients
+
     # --- Output JSON ---
     cat > "$JSON_OUT" << EOF
 {
@@ -298,10 +385,11 @@ collect_data() {
     "rx_history": [$RX_HIST], "tx_history": [$TX_HIST],
     "source": "iw-station"
   },
-  "avail": {"current": $AVAIL, "last_success": $LAST_SUCCESS, "history": [$AVAIL_HIST]}
+  "avail": {"current": $AVAIL, "last_success": $LAST_SUCCESS, "history": [$AVAIL_HIST]},
+  "clients": {"online": $CLIENTS_ONLINE, "total_tx": $CLIENTS_TOTAL_TX, "total_rx": $CLIENTS_TOTAL_RX, "history": [$CLIENTS_HIST], "list": [$CLIENTS_JSON]}
 }
 EOF
-    log "Web:${WEB_MS}ms Ping:${PING_MS}ms DL:${TX_KBPS}K UL:${RX_KBPS}K"
+    log "Web:${WEB_MS}ms Ping:${PING_MS}ms DL:${TX_KBPS}K UL:${RX_KBPS}K Clients:${CLIENTS_ONLINE}"
 }
 
 # Cleanup on exit
