@@ -2,8 +2,13 @@
 # Dashboard data collector daemon - runs every 5 seconds
 # Stores data in /tmp (RAM) with rolling history
 
+# --- Configuration ---
 INTERVAL=5
 MAX_HISTORY=120  # 120 samples * 5 sec = 10 minutes of history
+UPLINK_DETECT_INTERVAL=60  # Re-detect every 60 samples (5 min at 5s interval)
+HINTS_CACHE_AGE=60  # Refresh LuCI hints cache every 60 seconds
+
+# --- File paths ---
 JSON_OUT="/www/data.json"
 FETCH_LOG="/tmp/fetch_history.log"
 PING_LOG="/tmp/ping_history.log"
@@ -13,9 +18,39 @@ PID_FILE="/tmp/dash_daemon.pid"
 AVAIL_LOG="/tmp/avail_history.log"
 LAST_SUCCESS_FILE="/tmp/last_success.txt"
 UPLINK_CACHE="/tmp/uplink_cache.json"
-UPLINK_DETECT_INTERVAL=60  # Re-detect every 60 samples (5 min at 5s interval)
-UPLINK_SAMPLE_COUNT=0
 CLIENTS_LOG="/tmp/clients_history.log"
+DHCP_LEASES="/tmp/dhcp.leases"
+LUCI_HINTS_CACHE="/tmp/luci_hints.cache"
+
+# --- Runtime state ---
+UPLINK_SAMPLE_COUNT=0
+LAST_SSID=""
+LAST_EXTERNAL_IP=""
+LAST_AVAIL_STATE=1
+
+# --- Constants ---
+DEFAULT_UPLINK='{"connection_type":"unknown","isp":"Unknown","thresholds":{"ping":{"good":30,"warn":80},"web":{"good":100,"warn":300}}}'
+
+# --- Helper Functions ---
+
+log() {
+  echo "$(date '+%H:%M:%S') $1"
+}
+
+# Append value to log file and rotate to MAX_HISTORY lines
+append_history() {
+  local value="$1"
+  local logfile="$2"
+  echo "$value" >> "$logfile"
+  tail -n $MAX_HISTORY "$logfile" > "${logfile}.tmp" && mv "${logfile}.tmp" "$logfile"
+}
+
+# Format log file as comma-separated values (filters to valid integers)
+format_history_csv() {
+  local logfile="$1"
+  local pattern="${2:-^-?[0-9]+$}"  # Default: integers including negative
+  awk -v pat="$pattern" 'NF && $0 ~ pat {printf "%s%s", sep, $1; sep=","}' "$logfile"
+}
 
 # --- Uplink Detection Functions ---
 
@@ -91,8 +126,24 @@ get_thresholds() {
 }
 
 detect_uplink() {
-  # Check if we have a valid cache
-  if [ -f "$UPLINK_CACHE" ] && [ $UPLINK_SAMPLE_COUNT -lt $UPLINK_DETECT_INTERVAL ]; then
+  local force_redetect=0
+  local current_ssid="$UPLINK_SSID"
+
+  # Force re-detect if SSID changed
+  if [ -n "$LAST_SSID" ] && [ "$current_ssid" != "$LAST_SSID" ]; then
+    log "SSID changed ($LAST_SSID -> $current_ssid), re-detecting uplink..."
+    force_redetect=1
+  fi
+  LAST_SSID="$current_ssid"
+
+  # Force re-detect if coming back online after outage
+  if [ "$LAST_AVAIL_STATE" = "0" ] && [ "$AVAIL" = "1" ]; then
+    log "Connection restored, re-detecting uplink..."
+    force_redetect=1
+  fi
+
+  # Check if we have a valid cache and no force trigger
+  if [ $force_redetect -eq 0 ] && [ -f "$UPLINK_CACHE" ] && [ $UPLINK_SAMPLE_COUNT -lt $UPLINK_DETECT_INTERVAL ]; then
     UPLINK_SAMPLE_COUNT=$((UPLINK_SAMPLE_COUNT + 1))
     return 0
   fi
@@ -101,21 +152,22 @@ detect_uplink() {
   UPLINK_SAMPLE_COUNT=0
 
   local ext_ip=$(get_external_ip)
+
+  # Also force re-detect if external IP changed
+  if [ -n "$LAST_EXTERNAL_IP" ] && [ -n "$ext_ip" ] && [ "$ext_ip" != "$LAST_EXTERNAL_IP" ]; then
+    log "External IP changed ($LAST_EXTERNAL_IP -> $ext_ip)"
+  fi
+  [ -n "$ext_ip" ] && LAST_EXTERNAL_IP="$ext_ip"
   if [ -z "$ext_ip" ]; then
     log "Could not get external IP, using defaults"
-    # Write default cache (landline defaults)
-    cat > "$UPLINK_CACHE" << CACHE
-{"connection_type":"unknown","isp":"Unknown","thresholds":{"ping":{"good":30,"warn":80},"web":{"good":100,"warn":300}}}
-CACHE
+    echo "$DEFAULT_UPLINK" > "$UPLINK_CACHE"
     return 1
   fi
 
   local asn_info=$(lookup_asn "$ext_ip")
   if [ -z "$asn_info" ]; then
     log "Could not lookup ASN, using defaults"
-    cat > "$UPLINK_CACHE" << CACHE
-{"connection_type":"unknown","isp":"Unknown","thresholds":{"ping":{"good":30,"warn":80},"web":{"good":100,"warn":300}}}
-CACHE
+    echo "$DEFAULT_UPLINK" > "$UPLINK_CACHE"
     return 1
   fi
 
@@ -141,15 +193,14 @@ CACHE
 
 # Collect client data using jsonfilter (available on OpenWrt)
 collect_clients() {
-  # Refresh LuCI hints cache occasionally (every 60 seconds)
-  local hints_cache="/tmp/luci_hints.cache"
+  # Refresh LuCI hints cache occasionally
   local hints_age=9999
-  if [ -f "$hints_cache" ]; then
-    local cache_mtime=$(stat -c %Y "$hints_cache" 2>/dev/null || stat -f %m "$hints_cache" 2>/dev/null || echo 0)
+  if [ -f "$LUCI_HINTS_CACHE" ]; then
+    local cache_mtime=$(stat -c %Y "$LUCI_HINTS_CACHE" 2>/dev/null || stat -f %m "$LUCI_HINTS_CACHE" 2>/dev/null || echo 0)
     hints_age=$(($(date +%s) - cache_mtime))
   fi
-  if [ $hints_age -gt 60 ]; then
-    ubus call luci-rpc getHostHints '{}' > "$hints_cache" 2>/dev/null
+  if [ $hints_age -gt $HINTS_CACHE_AGE ]; then
+    ubus call luci-rpc getHostHints '{}' > "$LUCI_HINTS_CACHE" 2>/dev/null
   fi
 
   # Get gl-clients data
@@ -187,9 +238,9 @@ collect_clients() {
       name="$gl_name"
     fi
     # 2. Check DHCP leases
-    if [ -z "$name" ] && [ -f /tmp/dhcp.leases ]; then
+    if [ -z "$name" ] && [ -f "$DHCP_LEASES" ]; then
       local mac_lower=$(echo "$mac" | tr '[:upper:]' '[:lower:]')
-      name=$(awk -v m="$mac_lower" 'tolower($2)==m && $4!="*" {print $4}' /tmp/dhcp.leases)
+      name=$(awk -v m="$mac_lower" 'tolower($2)==m && $4!="*" {print $4}' "$DHCP_LEASES")
     fi
     # 3. Check if random MAC (locally administered)
     if [ -z "$name" ]; then
@@ -213,9 +264,8 @@ collect_clients() {
   done
 
   # Update history
-  echo "$CLIENTS_ONLINE" >> "$CLIENTS_LOG"
-  tail -n $MAX_HISTORY "$CLIENTS_LOG" > "${CLIENTS_LOG}.tmp" && mv "${CLIENTS_LOG}.tmp" "$CLIENTS_LOG"
-  CLIENTS_HIST=$(cat "$CLIENTS_LOG" | tr '\n' ',' | sed 's/,$//')
+  append_history "$CLIENTS_ONLINE" "$CLIENTS_LOG"
+  CLIENTS_HIST=$(format_history_csv "$CLIENTS_LOG" "^[0-9]+$")
   [ -z "$CLIENTS_HIST" ] && CLIENTS_HIST="0"
 }
 
@@ -229,10 +279,6 @@ echo $$ > "$PID_FILE"
 [ -f "$AVAIL_LOG" ] || touch "$AVAIL_LOG"
 [ -f "$CLIENTS_LOG" ] || touch "$CLIENTS_LOG"
 [ -f "$LAST_SUCCESS_FILE" ] || echo "0" > "$LAST_SUCCESS_FILE"
-
-log() {
-    echo "$(date '+%H:%M:%S') $1"
-}
 
 get_uplink_ssid() {
     # Try sta0/sta1 first (repeater uplink interfaces)
@@ -249,7 +295,10 @@ get_uplink_ssid() {
 collect_data() {
     NOW=$(date +%s)
 
-    # --- Detect uplink type (cached, refreshes every 5 min) ---
+    # --- Get uplink SSID first (needed for change detection) ---
+    UPLINK_SSID=$(get_uplink_ssid)
+
+    # --- Detect uplink type (cached, refreshes on SSID change or every 5 min) ---
     detect_uplink
     UPLINK_JSON=$(cat "$UPLINK_CACHE" 2>/dev/null || echo '{"connection_type":"landline","isp":"Unknown","thresholds":{"ping":{"good":30,"warn":80},"web":{"good":100,"warn":300}}}')
 
@@ -264,9 +313,8 @@ collect_data() {
         WEB_MS=-1
     fi
 
-    echo "$WEB_MS" >> "$FETCH_LOG"
-    tail -n $MAX_HISTORY "$FETCH_LOG" > "${FETCH_LOG}.tmp" && mv "${FETCH_LOG}.tmp" "$FETCH_LOG"
-    FETCH_HIST=$(awk 'NF && /^-?[0-9]+$/ {printf "%s%s", sep, $1; sep=","}' "$FETCH_LOG")
+    append_history "$WEB_MS" "$FETCH_LOG"
+    FETCH_HIST=$(format_history_csv "$FETCH_LOG")
     [ -z "$FETCH_HIST" ] && FETCH_HIST="0"
 
     # --- Ping latency ---
@@ -275,12 +323,11 @@ collect_data() {
 
     # Store ping history (convert to int, -1 for failure)
     if [ "$PING_MS" = "-1" ]; then
-        echo "-1" >> "$PING_LOG"
+        append_history "-1" "$PING_LOG"
     else
-        printf "%.0f\n" "$PING_MS" >> "$PING_LOG"
+        append_history "$(printf "%.0f" "$PING_MS")" "$PING_LOG"
     fi
-    tail -n $MAX_HISTORY "$PING_LOG" > "${PING_LOG}.tmp" && mv "${PING_LOG}.tmp" "$PING_LOG"
-    PING_HIST=$(awk 'NF && /^-?[0-9]+$/ {printf "%s%s", sep, $1; sep=","}' "$PING_LOG")
+    PING_HIST=$(format_history_csv "$PING_LOG")
     [ -z "$PING_HIST" ] && PING_HIST="0"
 
     # --- Throughput from iw ---
@@ -332,9 +379,8 @@ collect_data() {
     cp "$TMP_FILE" "$IW_CACHE"
     echo "$NOW" > "$IW_CACHE.time"
 
-    # Update history
-    echo "${TX_KBPS},${RX_KBPS}" >> "$THRU_LOG"
-    tail -n $MAX_HISTORY "$THRU_LOG" > "${THRU_LOG}.tmp" && mv "${THRU_LOG}.tmp" "$THRU_LOG"
+    # Update history (stores tx,rx pairs per line - custom extraction below)
+    append_history "${TX_KBPS},${RX_KBPS}" "$THRU_LOG"
 
     TX_HIST=$(awk -F',' 'NF==2 && $1 ~ /^[0-9]+$/ {printf "%s%s", sep, $1; sep=","}' "$THRU_LOG")
     RX_HIST=$(awk -F',' 'NF==2 && $2 ~ /^[0-9]+$/ {printf "%s%s", sep, $2; sep=","}' "$THRU_LOG")
@@ -343,9 +389,6 @@ collect_data() {
 
     TX_PEAK=$(awk -F',' 'NF==2 && $1 ~ /^[0-9]+$/ {if($1>max)max=$1} END{print max+0}' "$THRU_LOG")
     RX_PEAK=$(awk -F',' 'NF==2 && $2 ~ /^[0-9]+$/ {if($2>max)max=$2} END{print max+0}' "$THRU_LOG")
-
-    # --- Get uplink SSID ---
-    UPLINK_SSID=$(get_uplink_ssid)
 
     # --- Availability tracking ---
     WEB_OK=0; PING_OK=0
@@ -360,9 +403,8 @@ collect_data() {
         AVAIL=0
     fi
 
-    echo "$AVAIL" >> "$AVAIL_LOG"
-    tail -n $MAX_HISTORY "$AVAIL_LOG" > "${AVAIL_LOG}.tmp" && mv "${AVAIL_LOG}.tmp" "$AVAIL_LOG"
-    AVAIL_HIST=$(awk 'NF && /^[01]$/ {printf "%s%s", sep, $1; sep=","}' "$AVAIL_LOG")
+    append_history "$AVAIL" "$AVAIL_LOG"
+    AVAIL_HIST=$(format_history_csv "$AVAIL_LOG" "^[01]$")
     [ -z "$AVAIL_HIST" ] && AVAIL_HIST="1"
 
     read LAST_SUCCESS < "$LAST_SUCCESS_FILE" 2>/dev/null || LAST_SUCCESS=0
@@ -390,6 +432,9 @@ collect_data() {
 }
 EOF
     log "Web:${WEB_MS}ms Ping:${PING_MS}ms DL:${TX_KBPS}K UL:${RX_KBPS}K Clients:${CLIENTS_ONLINE}"
+
+    # Track availability state for next cycle (to detect connection restoration)
+    LAST_AVAIL_STATE=$AVAIL
 }
 
 # Cleanup on exit
