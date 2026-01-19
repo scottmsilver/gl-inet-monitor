@@ -119,7 +119,7 @@ get_thresholds() {
   # Web thresholds ~3x ping (TCP handshake + HTTP round trips)
   case "$conn_type" in
     starlink) echo "60 120 200 400" ;;
-    airplane|geo_satellite|maritime) echo "700 1000 2000 3500" ;;
+    airplane|geo_satellite|maritime) echo "775 1100 2000 3500" ;;
     cellular) echo "80 150 250 500" ;;
     *) echo "30 80 100 300" ;;
   esac

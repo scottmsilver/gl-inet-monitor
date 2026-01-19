@@ -96,7 +96,7 @@ get_thresholds() {
   local conn_type="$1"
   case "$conn_type" in
     starlink) echo "60 120 200 400" ;;
-    airplane|geo_satellite|maritime) echo "700 1000 2000 3500" ;;
+    airplane|geo_satellite|maritime) echo "775 1100 2000 3500" ;;
     cellular) echo "80 150 250 500" ;;
     *) echo "30 80 100 300" ;;
   esac
@@ -106,10 +106,10 @@ result=$(get_thresholds "starlink")
 assert_eq "Starlink thresholds" "60 120 200 400" "$result"
 
 result=$(get_thresholds "airplane")
-assert_eq "Airplane thresholds" "700 1000 2000 3500" "$result"
+assert_eq "Airplane thresholds" "775 1100 2000 3500" "$result"
 
 result=$(get_thresholds "geo_satellite")
-assert_eq "Geo satellite thresholds" "700 1000 2000 3500" "$result"
+assert_eq "Geo satellite thresholds" "775 1100 2000 3500" "$result"
 
 result=$(get_thresholds "cellular")
 assert_eq "Cellular thresholds" "80 150 250 500" "$result"
@@ -272,11 +272,11 @@ parse_thresholds() {
 
 thresholds=$(get_thresholds "airplane")
 result=$(parse_thresholds "$thresholds")
-assert_eq "Parse airplane thresholds" "700 1000 2000 3500" "$result"
+assert_eq "Parse airplane thresholds" "775 1100 2000 3500" "$result"
 
 # Extract individual values
 ping_good=$(echo "$thresholds" | cut -d' ' -f1)
-assert_eq "Airplane ping_good" "700" "$ping_good"
+assert_eq "Airplane ping_good" "775" "$ping_good"
 
 web_warn=$(echo "$thresholds" | cut -d' ' -f4)
 assert_eq "Airplane web_warn" "3500" "$web_warn"
