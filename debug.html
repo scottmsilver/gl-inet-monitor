@@ -1,0 +1,574 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Beryl Dashboard - Debug</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: #1a1a2e;
+      color: #eee;
+      padding: 16px;
+      min-height: 100vh;
+    }
+
+    .debug-layout {
+      max-width: 800px;
+      margin: 0 auto;
+    }
+
+    .debug-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 16px;
+      padding-bottom: 12px;
+      border-bottom: 1px solid rgba(255,255,255,0.1);
+    }
+    .debug-header h1 {
+      font-size: 18px;
+      font-weight: 500;
+      color: #a78bfa;
+    }
+    .debug-header .back-link {
+      color: #666;
+      text-decoration: none;
+      font-size: 12px;
+    }
+    .debug-header .back-link:hover { color: #888; }
+    .debug-header .last-update {
+      color: #555;
+      font-size: 11px;
+      font-family: 'SF Mono', Monaco, 'Courier New', monospace;
+    }
+
+    .debug-section {
+      background: #252542;
+      border-radius: 8px;
+      margin-bottom: 12px;
+      overflow: hidden;
+    }
+
+    .section-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 10px 14px;
+      background: rgba(255,255,255,0.03);
+      cursor: pointer;
+      user-select: none;
+    }
+    .section-header:hover { background: rgba(255,255,255,0.05); }
+    .section-header h2 {
+      font-size: 13px;
+      font-weight: 500;
+      color: #eee;
+    }
+    .section-header .badge {
+      font-size: 10px;
+      padding: 2px 6px;
+      border-radius: 4px;
+      background: rgba(167,139,250,0.2);
+      color: #a78bfa;
+      font-family: 'SF Mono', Monaco, 'Courier New', monospace;
+    }
+    .section-header .badge.ok { background: rgba(74,222,128,0.2); color: #4ade80; }
+    .section-header .badge.warn { background: rgba(250,204,21,0.2); color: #facc15; }
+    .section-header .badge.error { background: rgba(248,113,113,0.2); color: #f87171; }
+    .section-header .toggle {
+      color: #666;
+      font-size: 12px;
+      transition: transform 0.2s;
+    }
+    .section-header.collapsed .toggle { transform: rotate(-90deg); }
+
+    .section-content {
+      padding: 12px 14px;
+      border-top: 1px solid rgba(255,255,255,0.05);
+      max-height: 400px;
+      overflow-y: auto;
+    }
+    .section-content.collapsed { display: none; }
+
+    .log-content {
+      font-family: 'SF Mono', Monaco, 'Courier New', monospace;
+      font-size: 11px;
+      line-height: 1.6;
+      white-space: pre-wrap;
+      word-break: break-all;
+      color: #ccc;
+    }
+
+    .json-content {
+      font-family: 'SF Mono', Monaco, 'Courier New', monospace;
+      font-size: 11px;
+      line-height: 1.5;
+      white-space: pre-wrap;
+      word-break: break-all;
+    }
+    .json-key { color: #a78bfa; }
+    .json-string { color: #4ade80; }
+    .json-number { color: #60a5fa; }
+    .json-boolean { color: #facc15; }
+    .json-null { color: #f87171; }
+
+    .stat-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+      gap: 8px;
+    }
+    .stat-item {
+      display: flex;
+      justify-content: space-between;
+      padding: 6px 10px;
+      background: rgba(255,255,255,0.03);
+      border-radius: 4px;
+    }
+    .stat-label {
+      color: #888;
+      font-size: 11px;
+    }
+    .stat-value {
+      font-family: 'SF Mono', Monaco, 'Courier New', monospace;
+      font-size: 11px;
+      color: #eee;
+    }
+    .stat-value.good { color: #4ade80; }
+    .stat-value.warn { color: #facc15; }
+    .stat-value.bad { color: #f87171; }
+
+    .log-line {
+      display: flex;
+      padding: 2px 0;
+      border-bottom: 1px solid rgba(255,255,255,0.03);
+    }
+    .log-line:last-child { border-bottom: none; }
+    .log-line .line-num {
+      color: #555;
+      min-width: 30px;
+      text-align: right;
+      padding-right: 10px;
+      user-select: none;
+    }
+    .log-line .line-content {
+      flex: 1;
+    }
+    .log-line .line-content.negative { color: #f87171; }
+    .log-line .line-content.zero { color: #666; }
+
+    .empty-state {
+      color: #555;
+      font-style: italic;
+      text-align: center;
+      padding: 20px;
+    }
+
+    .refresh-btn {
+      background: rgba(167,139,250,0.2);
+      color: #a78bfa;
+      border: none;
+      padding: 6px 12px;
+      border-radius: 4px;
+      font-size: 11px;
+      cursor: pointer;
+      font-family: inherit;
+    }
+    .refresh-btn:hover { background: rgba(167,139,250,0.3); }
+
+    .actions {
+      display: flex;
+      gap: 8px;
+      margin-bottom: 16px;
+    }
+
+    .action-btn {
+      background: rgba(255,255,255,0.05);
+      color: #888;
+      border: 1px solid rgba(255,255,255,0.1);
+      padding: 8px 14px;
+      border-radius: 6px;
+      font-size: 12px;
+      cursor: pointer;
+      font-family: inherit;
+      transition: all 0.15s;
+    }
+    .action-btn:hover {
+      background: rgba(255,255,255,0.08);
+      color: #eee;
+      border-color: rgba(255,255,255,0.2);
+    }
+    .action-btn.danger { color: #f87171; border-color: rgba(248,113,113,0.3); }
+    .action-btn.danger:hover { background: rgba(248,113,113,0.1); }
+  </style>
+</head>
+<body>
+
+  <div class="debug-layout">
+    <div class="debug-header">
+      <h1>Debug Console</h1>
+      <span class="last-update" id="lastUpdate">--:--:--</span>
+      <a href="dash2.html" class="back-link">Back to Dashboard</a>
+    </div>
+
+    <div class="actions">
+      <button class="action-btn" onclick="fetchAll()">Refresh All</button>
+      <button class="action-btn" onclick="toggleAutoRefresh()">
+        <span id="autoRefreshLabel">Auto-refresh: OFF</span>
+      </button>
+      <button class="action-btn danger" onclick="clearUplinkCache()">Clear Uplink Cache</button>
+    </div>
+
+    <!-- Runtime State -->
+    <div class="debug-section">
+      <div class="section-header" onclick="toggleSection(this)">
+        <h2>Runtime State</h2>
+        <span class="toggle">&#9662;</span>
+      </div>
+      <div class="section-content">
+        <div class="stat-grid" id="runtimeStats">
+          <div class="stat-item"><span class="stat-label">Loading...</span></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Uplink Cache -->
+    <div class="debug-section">
+      <div class="section-header" onclick="toggleSection(this)">
+        <h2>Uplink Cache</h2>
+        <span class="badge" id="uplinkBadge">--</span>
+        <span class="toggle">&#9662;</span>
+      </div>
+      <div class="section-content">
+        <div class="json-content" id="uplinkCache">Loading...</div>
+      </div>
+    </div>
+
+    <!-- data.json -->
+    <div class="debug-section">
+      <div class="section-header" onclick="toggleSection(this)">
+        <h2>data.json</h2>
+        <span class="badge" id="dataBadge">--</span>
+        <span class="toggle">&#9662;</span>
+      </div>
+      <div class="section-content">
+        <div class="json-content" id="dataJson">Loading...</div>
+      </div>
+    </div>
+
+    <!-- Web Latency Log -->
+    <div class="debug-section">
+      <div class="section-header collapsed" onclick="toggleSection(this)">
+        <h2>Web Latency Log</h2>
+        <span class="badge" id="webLogBadge">--</span>
+        <span class="toggle">&#9662;</span>
+      </div>
+      <div class="section-content collapsed" id="webLogContent">
+        <div class="log-content" id="webLog">Loading...</div>
+      </div>
+    </div>
+
+    <!-- Ping Latency Log -->
+    <div class="debug-section">
+      <div class="section-header collapsed" onclick="toggleSection(this)">
+        <h2>Ping Latency Log</h2>
+        <span class="badge" id="pingLogBadge">--</span>
+        <span class="toggle">&#9662;</span>
+      </div>
+      <div class="section-content collapsed" id="pingLogContent">
+        <div class="log-content" id="pingLog">Loading...</div>
+      </div>
+    </div>
+
+    <!-- Throughput Log -->
+    <div class="debug-section">
+      <div class="section-header collapsed" onclick="toggleSection(this)">
+        <h2>Throughput Log</h2>
+        <span class="badge" id="thruLogBadge">--</span>
+        <span class="toggle">&#9662;</span>
+      </div>
+      <div class="section-content collapsed" id="thruLogContent">
+        <div class="log-content" id="thruLog">Loading...</div>
+      </div>
+    </div>
+
+    <!-- Availability Log -->
+    <div class="debug-section">
+      <div class="section-header collapsed" onclick="toggleSection(this)">
+        <h2>Availability Log</h2>
+        <span class="badge" id="availLogBadge">--</span>
+        <span class="toggle">&#9662;</span>
+      </div>
+      <div class="section-content collapsed" id="availLogContent">
+        <div class="log-content" id="availLog">Loading...</div>
+      </div>
+    </div>
+
+    <!-- Clients Log -->
+    <div class="debug-section">
+      <div class="section-header collapsed" onclick="toggleSection(this)">
+        <h2>Clients Log</h2>
+        <span class="badge" id="clientsLogBadge">--</span>
+        <span class="toggle">&#9662;</span>
+      </div>
+      <div class="section-content collapsed" id="clientsLogContent">
+        <div class="log-content" id="clientsLog">Loading...</div>
+      </div>
+    </div>
+
+    <!-- LuCI Hints Cache -->
+    <div class="debug-section">
+      <div class="section-header collapsed" onclick="toggleSection(this)">
+        <h2>LuCI Hints Cache</h2>
+        <span class="badge" id="hintsBadge">--</span>
+        <span class="toggle">&#9662;</span>
+      </div>
+      <div class="section-content collapsed" id="hintsContent">
+        <div class="json-content" id="hintsCache">Loading...</div>
+      </div>
+    </div>
+
+  </div>
+
+  <script>
+    let autoRefresh = false;
+    let autoRefreshInterval = null;
+
+    function toggleSection(header) {
+      header.classList.toggle('collapsed');
+      const content = header.nextElementSibling;
+      content.classList.toggle('collapsed');
+    }
+
+    function formatJson(obj, indent = 0) {
+      const spaces = '  '.repeat(indent);
+      if (obj === null) return '<span class="json-null">null</span>';
+      if (typeof obj === 'boolean') return `<span class="json-boolean">${obj}</span>`;
+      if (typeof obj === 'number') return `<span class="json-number">${obj}</span>`;
+      if (typeof obj === 'string') return `<span class="json-string">"${escapeHtml(obj)}"</span>`;
+
+      if (Array.isArray(obj)) {
+        if (obj.length === 0) return '[]';
+        // For short arrays of numbers, inline them
+        if (obj.length <= 20 && obj.every(v => typeof v === 'number')) {
+          return '[' + obj.map(v => `<span class="json-number">${v}</span>`).join(', ') + ']';
+        }
+        const items = obj.map(v => spaces + '  ' + formatJson(v, indent + 1));
+        return '[\n' + items.join(',\n') + '\n' + spaces + ']';
+      }
+
+      if (typeof obj === 'object') {
+        const keys = Object.keys(obj);
+        if (keys.length === 0) return '{}';
+        const items = keys.map(k =>
+          spaces + '  ' + `<span class="json-key">"${escapeHtml(k)}"</span>: ` + formatJson(obj[k], indent + 1)
+        );
+        return '{\n' + items.join(',\n') + '\n' + spaces + '}';
+      }
+
+      return String(obj);
+    }
+
+    function escapeHtml(text) {
+      const div = document.createElement('div');
+      div.textContent = text;
+      return div.innerHTML;
+    }
+
+    function formatLogLines(content, type) {
+      if (!content || content.trim() === '') {
+        return '<div class="empty-state">No data</div>';
+      }
+      const lines = content.trim().split('\n');
+      return lines.map((line, i) => {
+        const num = lines.length - i; // Reverse numbering (newest first shown at bottom)
+        let cls = '';
+        const val = parseFloat(line);
+        if (!isNaN(val)) {
+          if (val < 0) cls = 'negative';
+          else if (val === 0) cls = 'zero';
+        }
+        return `<div class="log-line"><span class="line-num">${i + 1}</span><span class="line-content ${cls}">${escapeHtml(line)}</span></div>`;
+      }).join('');
+    }
+
+    function updateBadge(id, count, hasErrors) {
+      const badge = document.getElementById(id);
+      if (!badge) return;
+      badge.textContent = count + ' lines';
+      badge.className = 'badge' + (hasErrors ? ' warn' : ' ok');
+    }
+
+    async function fetchFile(path) {
+      try {
+        const res = await fetch(path + '?' + Date.now());
+        if (!res.ok) return null;
+        return await res.text();
+      } catch (e) {
+        return null;
+      }
+    }
+
+    async function fetchJson(path) {
+      try {
+        const res = await fetch(path + '?' + Date.now());
+        if (!res.ok) return null;
+        return await res.json();
+      } catch (e) {
+        return null;
+      }
+    }
+
+    async function fetchAll() {
+      const now = new Date();
+      document.getElementById('lastUpdate').textContent =
+        now.getHours() + ':' + now.getMinutes().toString().padStart(2,'0') + ':' + now.getSeconds().toString().padStart(2,'0');
+
+      // Fetch data.json
+      const data = await fetchJson('/data.json');
+      if (data) {
+        document.getElementById('dataJson').innerHTML = formatJson(data);
+        document.getElementById('dataBadge').textContent = 'OK';
+        document.getElementById('dataBadge').className = 'badge ok';
+
+        // Update runtime stats from data.json
+        updateRuntimeStats(data);
+      } else {
+        document.getElementById('dataJson').innerHTML = '<div class="empty-state">Failed to load</div>';
+        document.getElementById('dataBadge').textContent = 'ERROR';
+        document.getElementById('dataBadge').className = 'badge error';
+      }
+
+      // Fetch uplink cache (embedded in data.json as uplink field)
+      if (data?.uplink) {
+        document.getElementById('uplinkCache').innerHTML = formatJson(data.uplink);
+        document.getElementById('uplinkBadge').textContent = data.uplink.connection_type || 'unknown';
+        const ct = data.uplink.connection_type;
+        document.getElementById('uplinkBadge').className = 'badge' +
+          (ct === 'landline' ? ' ok' : ct === 'unknown' ? ' warn' : '');
+      }
+
+      // Fetch log files via debug endpoint (we'll create this)
+      await fetchLogs();
+    }
+
+    async function fetchLogs() {
+      // These would need a server-side endpoint to read
+      // For now, show the history from data.json
+      const data = await fetchJson('/data.json');
+      if (!data) return;
+
+      // Web log from history
+      if (data.web?.history) {
+        const lines = data.web.history.join('\n');
+        document.getElementById('webLog').innerHTML = formatLogLines(lines, 'web');
+        const errors = data.web.history.filter(v => v < 0).length;
+        updateBadge('webLogBadge', data.web.history.length, errors > 0);
+      }
+
+      // Ping log
+      if (data.ping?.history) {
+        const lines = data.ping.history.join('\n');
+        document.getElementById('pingLog').innerHTML = formatLogLines(lines, 'ping');
+        const errors = data.ping.history.filter(v => v < 0).length;
+        updateBadge('pingLogBadge', data.ping.history.length, errors > 0);
+      }
+
+      // Throughput log
+      if (data.throughput?.tx_history && data.throughput?.rx_history) {
+        const lines = data.throughput.tx_history.map((tx, i) => {
+          const rx = data.throughput.rx_history[i] || 0;
+          return `${tx},${rx}`;
+        }).join('\n');
+        document.getElementById('thruLog').innerHTML = formatLogLines(lines, 'thru');
+        updateBadge('thruLogBadge', data.throughput.tx_history.length, false);
+      }
+
+      // Availability log
+      if (data.avail?.history) {
+        const lines = data.avail.history.join('\n');
+        document.getElementById('availLog').innerHTML = formatLogLines(lines, 'avail');
+        const errors = data.avail.history.filter(v => v === 0).length;
+        updateBadge('availLogBadge', data.avail.history.length, errors > 0);
+      }
+
+      // Clients log
+      if (data.clients?.history) {
+        const lines = data.clients.history.join('\n');
+        document.getElementById('clientsLog').innerHTML = formatLogLines(lines, 'clients');
+        updateBadge('clientsLogBadge', data.clients.history.length, false);
+      }
+
+      // LuCI hints - would need server endpoint
+      document.getElementById('hintsCache').innerHTML = '<div class="empty-state">Requires server endpoint</div>';
+      document.getElementById('hintsBadge').textContent = 'N/A';
+    }
+
+    function updateRuntimeStats(data) {
+      const stats = [];
+
+      stats.push({ label: 'Timestamp', value: new Date(data.ts * 1000).toLocaleTimeString() });
+      stats.push({ label: 'Interval', value: data.interval + 's' });
+      stats.push({ label: 'Uplink SSID', value: data.uplink_ssid || '--' });
+      stats.push({ label: 'Connection Type', value: data.uplink?.connection_type || 'unknown' });
+      stats.push({ label: 'ISP', value: data.uplink?.isp || 'Unknown' });
+
+      const webClass = data.web?.ms < 0 ? 'bad' : (data.web?.ms < 300 ? 'good' : 'warn');
+      stats.push({ label: 'Web Latency', value: (data.web?.ms || -1) + 'ms', class: webClass });
+
+      const pingClass = data.ping?.current < 0 ? 'bad' : (data.ping?.current < 80 ? 'good' : 'warn');
+      stats.push({ label: 'Ping Latency', value: (data.ping?.current || -1) + 'ms', class: pingClass });
+
+      stats.push({ label: 'TX', value: (data.throughput?.tx_kbps || 0) + ' kbps' });
+      stats.push({ label: 'RX', value: (data.throughput?.rx_kbps || 0) + ' kbps' });
+      stats.push({ label: 'TX Peak', value: (data.throughput?.tx_peak || 0) + ' kbps' });
+      stats.push({ label: 'RX Peak', value: (data.throughput?.rx_peak || 0) + ' kbps' });
+
+      const availClass = data.avail?.current === 1 ? 'good' : 'bad';
+      stats.push({ label: 'Availability', value: data.avail?.current === 1 ? 'Online' : 'Offline', class: availClass });
+      stats.push({ label: 'Last Success', value: data.avail?.last_success ? new Date(data.avail.last_success * 1000).toLocaleTimeString() : '--' });
+
+      stats.push({ label: 'Clients Online', value: data.clients?.online || 0 });
+      stats.push({ label: 'Client TX Total', value: (data.clients?.total_tx || 0) + ' kbps' });
+      stats.push({ label: 'Client RX Total', value: (data.clients?.total_rx || 0) + ' kbps' });
+
+      // Thresholds
+      if (data.uplink?.thresholds) {
+        stats.push({ label: 'Ping Good', value: '<' + data.uplink.thresholds.ping.good + 'ms' });
+        stats.push({ label: 'Ping Warn', value: '<' + data.uplink.thresholds.ping.warn + 'ms' });
+        stats.push({ label: 'Web Good', value: '<' + data.uplink.thresholds.web.good + 'ms' });
+        stats.push({ label: 'Web Warn', value: '<' + data.uplink.thresholds.web.warn + 'ms' });
+      }
+
+      document.getElementById('runtimeStats').innerHTML = stats.map(s => `
+        <div class="stat-item">
+          <span class="stat-label">${s.label}</span>
+          <span class="stat-value${s.class ? ' ' + s.class : ''}">${s.value}</span>
+        </div>
+      `).join('');
+    }
+
+    function toggleAutoRefresh() {
+      autoRefresh = !autoRefresh;
+      document.getElementById('autoRefreshLabel').textContent =
+        'Auto-refresh: ' + (autoRefresh ? 'ON' : 'OFF');
+
+      if (autoRefresh) {
+        autoRefreshInterval = setInterval(fetchAll, 5000);
+      } else {
+        clearInterval(autoRefreshInterval);
+        autoRefreshInterval = null;
+      }
+    }
+
+    async function clearUplinkCache() {
+      // This would need a server endpoint
+      alert('To clear the uplink cache, run on the router:\nrm -f /tmp/uplink_cache.json\n\nThe cache will be regenerated on the next detection cycle.');
+    }
+
+    // Initial load
+    fetchAll();
+  </script>
+</body>
+</html>
