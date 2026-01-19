@@ -165,18 +165,6 @@
       padding: 20px;
     }
 
-    .refresh-btn {
-      background: rgba(167,139,250,0.2);
-      color: #a78bfa;
-      border: none;
-      padding: 6px 12px;
-      border-radius: 4px;
-      font-size: 11px;
-      cursor: pointer;
-      font-family: inherit;
-    }
-    .refresh-btn:hover { background: rgba(167,139,250,0.3); }
-
     .actions {
       display: flex;
       gap: 8px;
@@ -376,13 +364,12 @@
       return div.innerHTML;
     }
 
-    function formatLogLines(content, type) {
+    function formatLogLines(content) {
       if (!content || content.trim() === '') {
         return '<div class="empty-state">No data</div>';
       }
       const lines = content.trim().split('\n');
       return lines.map((line, i) => {
-        const num = lines.length - i; // Reverse numbering (newest first shown at bottom)
         let cls = '';
         const val = parseFloat(line);
         if (!isNaN(val)) {
@@ -400,14 +387,12 @@
       badge.className = 'badge' + (hasErrors ? ' warn' : ' ok');
     }
 
-    async function fetchFile(path) {
-      try {
-        const res = await fetch(path + '?' + Date.now());
-        if (!res.ok) return null;
-        return await res.text();
-      } catch (e) {
-        return null;
-      }
+    function updateLogSection(history, logId, badgeId, errorFilter = v => v < 0) {
+      if (!history) return;
+      const lines = history.join('\n');
+      document.getElementById(logId).innerHTML = formatLogLines(lines);
+      const errors = history.filter(errorFilter).length;
+      updateBadge(badgeId, history.length, errors > 0);
     }
 
     async function fetchJson(path) {
@@ -449,55 +434,25 @@
           (ct === 'landline' ? ' ok' : ct === 'unknown' ? ' warn' : '');
       }
 
-      // Fetch log files via debug endpoint (we'll create this)
-      await fetchLogs();
+      // Update log sections from data.json history
+      updateLogSections(data);
     }
 
-    async function fetchLogs() {
-      // These would need a server-side endpoint to read
-      // For now, show the history from data.json
-      const data = await fetchJson('/data.json');
+    function updateLogSections(data) {
       if (!data) return;
 
-      // Web log from history
-      if (data.web?.history) {
-        const lines = data.web.history.join('\n');
-        document.getElementById('webLog').innerHTML = formatLogLines(lines, 'web');
-        const errors = data.web.history.filter(v => v < 0).length;
-        updateBadge('webLogBadge', data.web.history.length, errors > 0);
-      }
+      // Simple logs - use helper
+      updateLogSection(data.web?.history, 'webLog', 'webLogBadge');
+      updateLogSection(data.ping?.history, 'pingLog', 'pingLogBadge');
+      updateLogSection(data.avail?.history, 'availLog', 'availLogBadge', v => v === 0);
+      updateLogSection(data.clients?.history, 'clientsLog', 'clientsLogBadge', () => false);
 
-      // Ping log
-      if (data.ping?.history) {
-        const lines = data.ping.history.join('\n');
-        document.getElementById('pingLog').innerHTML = formatLogLines(lines, 'ping');
-        const errors = data.ping.history.filter(v => v < 0).length;
-        updateBadge('pingLogBadge', data.ping.history.length, errors > 0);
-      }
-
-      // Throughput log
+      // Throughput log - special handling for tx,rx pairs
       if (data.throughput?.tx_history && data.throughput?.rx_history) {
-        const lines = data.throughput.tx_history.map((tx, i) => {
-          const rx = data.throughput.rx_history[i] || 0;
-          return `${tx},${rx}`;
-        }).join('\n');
-        document.getElementById('thruLog').innerHTML = formatLogLines(lines, 'thru');
-        updateBadge('thruLogBadge', data.throughput.tx_history.length, false);
-      }
-
-      // Availability log
-      if (data.avail?.history) {
-        const lines = data.avail.history.join('\n');
-        document.getElementById('availLog').innerHTML = formatLogLines(lines, 'avail');
-        const errors = data.avail.history.filter(v => v === 0).length;
-        updateBadge('availLogBadge', data.avail.history.length, errors > 0);
-      }
-
-      // Clients log
-      if (data.clients?.history) {
-        const lines = data.clients.history.join('\n');
-        document.getElementById('clientsLog').innerHTML = formatLogLines(lines, 'clients');
-        updateBadge('clientsLogBadge', data.clients.history.length, false);
+        const combined = data.throughput.tx_history.map((tx, i) =>
+          `${tx},${data.throughput.rx_history[i] || 0}`
+        );
+        updateLogSection(combined, 'thruLog', 'thruLogBadge', () => false);
       }
 
       // LuCI hints - would need server endpoint
