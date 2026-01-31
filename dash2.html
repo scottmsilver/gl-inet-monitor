@@ -1545,6 +1545,10 @@
         updateColumnWidths();
       } catch (e) {
         console.error('Fetch error:', e);
+        // Show "Not Connected" status but preserve existing data
+        const statusEl = document.getElementById('connStatus');
+        statusEl.textContent = 'Not Connected';
+        statusEl.className = 'conn-value bad';
       }
     }
 
