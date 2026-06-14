@@ -1,301 +1,341 @@
 #!/bin/sh
-# Test suite for dash_daemon.sh functions
+# Test suite for dash_daemon.sh
+#
+# Sources the daemon with DASH_DAEMON_TEST=1 so the main loop doesn't run;
+# then exercises every probe / schema / helper function with assertions.
+#
 # Run with: sh test_daemon.sh
+# Mocking strategy: override external commands (curl, ping, iwinfo, etc.) with
+# shell functions before calling a probe — shell functions take precedence
+# over PATH lookups.
 
 TESTS_RUN=0
 TESTS_PASSED=0
 TESTS_FAILED=0
 
-# Colors for output
 RED='\033[0;31m'
 GREEN='\033[0;32m'
-NC='\033[0m' # No Color
+YELLOW='\033[0;33m'
+NC='\033[0m'
 
 pass() {
-  TESTS_PASSED=$((TESTS_PASSED + 1))
-  printf "${GREEN}PASS${NC}: %s\n" "$1"
+    TESTS_PASSED=$((TESTS_PASSED + 1))
+    printf "${GREEN}PASS${NC}: %s\n" "$1"
 }
 
 fail() {
-  TESTS_FAILED=$((TESTS_FAILED + 1))
-  printf "${RED}FAIL${NC}: %s (expected '%s', got '%s')\n" "$1" "$2" "$3"
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+    printf "${RED}FAIL${NC}: %s\n      expected: %s\n      got:      %s\n" "$1" "$2" "$3"
 }
 
 assert_eq() {
-  TESTS_RUN=$((TESTS_RUN + 1))
-  local name="$1"
-  local expected="$2"
-  local actual="$3"
-  if [ "$expected" = "$actual" ]; then
-    pass "$name"
-  else
-    fail "$name" "$expected" "$actual"
-  fi
+    TESTS_RUN=$((TESTS_RUN + 1))
+    if [ "$2" = "$3" ]; then pass "$1"; else fail "$1" "$2" "$3"; fi
 }
 
 assert_contains() {
-  TESTS_RUN=$((TESTS_RUN + 1))
-  local name="$1"
-  local needle="$2"
-  local haystack="$3"
-  if echo "$haystack" | grep -q "$needle"; then
-    pass "$name"
-  else
-    fail "$name" "contains '$needle'" "$haystack"
-  fi
+    TESTS_RUN=$((TESTS_RUN + 1))
+    if echo "$3" | grep -qF "$2"; then pass "$1"; else fail "$1" "contains $2" "$3"; fi
 }
 
-# --- Setup: Source functions from daemon (skip the main loop) ---
-# We'll extract and test individual functions
-
-echo "=== Testing dash_daemon.sh functions ==="
-echo ""
-
-# --- Test classify_by_asn_number ---
-echo "--- classify_by_asn_number tests ---"
-
-classify_by_asn_number() {
-  local as_field="$1"
-  local asn=$(echo "$as_field" | grep -oE 'AS[0-9]+' | sed 's/AS//')
-  [ -z "$asn" ] && return 1
-
-  case "$asn" in
-    14593) echo "starlink"; return 0 ;;
-    21928|393960) echo "airplane"; return 0 ;;
-    18747|64294) echo "airplane"; return 0 ;;
-    50973|22351) echo "airplane"; return 0 ;;
-    7155|16491|40306|40311|46536) echo "geo_satellite"; return 0 ;;
-    1358|6621|63062) echo "geo_satellite"; return 0 ;;
-    35228) echo "geo_satellite"; return 0 ;;
-    15146|26415) echo "maritime"; return 0 ;;
-  esac
-  return 1
+assert_match() {
+    TESTS_RUN=$((TESTS_RUN + 1))
+    if echo "$3" | grep -qE "$2"; then pass "$1"; else fail "$1" "matches /$2/" "$3"; fi
 }
 
-result=$(classify_by_asn_number "AS14593 SpaceX Services")
-assert_eq "Starlink ASN 14593" "starlink" "$result"
-
-result=$(classify_by_asn_number "AS21928 Gogo LLC")
-assert_eq "Gogo airplane ASN 21928" "airplane" "$result"
-
-result=$(classify_by_asn_number "AS40306 ViaSat,Inc.")
-assert_eq "ViaSat ASN 40306" "geo_satellite" "$result"
-
-result=$(classify_by_asn_number "AS15146 Marlink")
-assert_eq "Marlink maritime ASN 15146" "maritime" "$result"
-
-result=$(classify_by_asn_number "AS7922 Comcast")
-assert_eq "Unknown ASN returns empty" "" "$result"
-
-echo ""
-
-# --- Test get_thresholds ---
-echo "--- get_thresholds tests ---"
-
-get_thresholds() {
-  local conn_type="$1"
-  case "$conn_type" in
-    starlink) echo "60 120 200 400" ;;
-    airplane|geo_satellite|maritime) echo "775 1100 2000 3500" ;;
-    cellular) echo "80 150 250 500" ;;
-    *) echo "30 80 100 300" ;;
-  esac
+assert_valid_json() {
+    TESTS_RUN=$((TESTS_RUN + 1))
+    if echo "$2" | jsonfilter -e '@' >/dev/null 2>&1; then
+        pass "$1"
+    else
+        fail "$1" "valid JSON (per jsonfilter)" "$2"
+    fi
 }
 
-result=$(get_thresholds "starlink")
-assert_eq "Starlink thresholds" "60 120 200 400" "$result"
+section() { printf "\n${YELLOW}=== %s ===${NC}\n" "$1"; }
 
-result=$(get_thresholds "airplane")
-assert_eq "Airplane thresholds" "775 1100 2000 3500" "$result"
+# --- Source the daemon under test ---
+DASH_DAEMON_TEST=1
+SCRIPT_DIR=$(dirname "$0")
+# Redirect any stray output during sourcing
+. "$SCRIPT_DIR/dash_daemon.sh"
 
-result=$(get_thresholds "geo_satellite")
-assert_eq "Geo satellite thresholds" "775 1100 2000 3500" "$result"
+# Override paths to use a sandbox so tests don't trample real router state.
+SANDBOX=$(mktemp -d 2>/dev/null || mktemp -d -t dashtest)
+JSON_OUT="$SANDBOX/data.json"
+FETCH_LOG="$SANDBOX/fetch.log"
+PING_LOG="$SANDBOX/ping.log"
+THRU_LOG="$SANDBOX/thru.log"
+AVAIL_LOG="$SANDBOX/avail.log"
+CLIENTS_LOG="$SANDBOX/clients.log"
+LAST_SUCCESS_FILE="$SANDBOX/last_success.txt"
+UPLINK_CACHE="$SANDBOX/uplink_cache.json"
+LUCI_HINTS_CACHE="$SANDBOX/luci_hints.cache"
+CLIENTS_LIST_FILE="$SANDBOX/clients_list.json"
+IW_CACHE="$SANDBOX/iw_cache"
 
-result=$(get_thresholds "cellular")
-assert_eq "Cellular thresholds" "80 150 250 500" "$result"
+trap 'rm -rf "$SANDBOX"' EXIT
 
-result=$(get_thresholds "landline")
-assert_eq "Landline thresholds" "30 80 100 300" "$result"
+############################################################
+section "json_escape (pure)"
+############################################################
 
-result=$(get_thresholds "unknown_type")
-assert_eq "Unknown type gets landline thresholds" "30 80 100 300" "$result"
+assert_eq "plain string"        "hello"        "$(json_escape hello)"
+assert_eq "embedded space"      "foo bar"      "$(json_escape 'foo bar')"
+assert_eq "double-quote"        'bad\"name'    "$(json_escape 'bad"name')"
+assert_eq "backslash"           'a\\b'         "$(json_escape 'a\b')"
+assert_eq "quote + backslash"   'a\\b\"c'      "$(json_escape 'a\b"c')"
+assert_eq "tab stripped"        "ab"           "$(json_escape "$(printf 'a\tb')")"
+assert_eq "newline stripped"    "ab"           "$(json_escape "$(printf 'a\nb')")"
+assert_eq "empty string"        ""             "$(json_escape '')"
 
-echo ""
+############################################################
+section "compute_avail (pure)"
+############################################################
 
-# --- Test classify_connection ---
-echo "--- classify_connection tests ---"
+assert_eq "all good -> 1"          "1" "$(compute_avail 204 50 15.5)"
+assert_eq "ping fails -> 0"        "0" "$(compute_avail 204 50 -1)"
+assert_eq "web code !=204 -> 0"    "0" "$(compute_avail 0 -1 15.5)"
+assert_eq "web ms <=0 -> 0"        "0" "$(compute_avail 204 0 15.5)"
+assert_eq "web ms negative -> 0"   "0" "$(compute_avail 204 -1 15.5)"
+assert_eq "all failed -> 0"        "0" "$(compute_avail 0 -1 -1)"
+assert_eq "non-numeric ms -> 0"    "0" "$(compute_avail 204 abc 15.5)"
 
-classify_connection() {
-  local asn_info="$1"
-  local as_field=$(echo "$asn_info" | grep -o '"as":"[^"]*"' | cut -d'"' -f4)
+############################################################
+section "record_history"
+############################################################
 
-  local result=$(classify_by_asn_number "$as_field")
-  if [ -n "$result" ]; then
-    echo "$result"
-    return
-  fi
+# Fresh log
+rm -f "$FETCH_LOG"
+result=$(record_history "10" "$FETCH_LOG")
+assert_eq "single entry CSV"       "10"        "$result"
 
-  local info_upper=$(echo "$asn_info" | tr '[:lower:]' '[:upper:]')
+result=$(record_history "20" "$FETCH_LOG")
+assert_eq "two entries CSV"        "10,20"     "$result"
 
-  if echo "$info_upper" | grep -qE 'STARLINK|SPACEX'; then
-    echo "starlink"; return
-  fi
-  if echo "$info_upper" | grep -qE 'GOGO|GO-GO|PANASONIC.*AVIONIC|INMARSAT|VIASAT.*AIRLINE|ANUVU|THALES|SMARTSKY|GLOBAL EAGLE'; then
-    echo "airplane"; return
-  fi
-  if echo "$info_upper" | grep -qE 'VIASAT|HUGHESNET|ECHOSTAR|EUTELSAT|SES S\.A|TELESAT|SKYTERRA'; then
-    echo "geo_satellite"; return
-  fi
-  if echo "$info_upper" | grep -qE 'MARITIME|MARLINK|KVH|SPEEDCAST'; then
-    echo "maritime"; return
-  fi
-  if echo "$info_upper" | grep -qE 'T-MOBILE|VERIZON WIRELESS|AT&T MOBILITY|CELLULAR|LTE|5G'; then
-    echo "cellular"; return
-  fi
-  echo "landline"
+result=$(record_history "30" "$FETCH_LOG")
+assert_eq "three entries CSV"      "10,20,30"  "$result"
+
+# Negative integer (default pattern allows -?[0-9]+)
+result=$(record_history "-1" "$FETCH_LOG")
+assert_eq "negative integer ok"    "10,20,30,-1"  "$result"
+
+# Pattern: only 0/1
+rm -f "$AVAIL_LOG"
+record_history "1" "$AVAIL_LOG" "^[01]$" > /dev/null
+record_history "0" "$AVAIL_LOG" "^[01]$" > /dev/null
+record_history "1" "$AVAIL_LOG" "^[01]$" > /dev/null
+result=$(record_history "0" "$AVAIL_LOG" "^[01]$")
+assert_eq "avail pattern filter"   "1,0,1,0"   "$result"
+
+############################################################
+section "probe_uplink_json (file-based)"
+############################################################
+
+# Empty cache -> DEFAULT
+rm -f "$UPLINK_CACHE"
+result=$(probe_uplink_json)
+assert_eq "missing cache -> DEFAULT" "$DEFAULT_UPLINK" "$result"
+
+# Garbage cache -> DEFAULT
+echo "garbage not json" > "$UPLINK_CACHE"
+result=$(probe_uplink_json)
+assert_eq "garbage cache -> DEFAULT" "$DEFAULT_UPLINK" "$result"
+
+# Valid JSON missing required field -> DEFAULT
+echo '{"foo":"bar"}' > "$UPLINK_CACHE"
+result=$(probe_uplink_json)
+assert_eq "missing connection_type -> DEFAULT" "$DEFAULT_UPLINK" "$result"
+
+# Valid JSON with connection_type -> echoed back
+valid='{"connection_type":"starlink","isp":"SpaceX"}'
+echo "$valid" > "$UPLINK_CACHE"
+result=$(probe_uplink_json)
+assert_eq "valid cache echoed" "$valid" "$result"
+
+############################################################
+section "probe_uplink_ssid (mocked iwinfo)"
+############################################################
+
+# Override `timeout` so it doesn't fork a PATH binary (which would bypass
+# our shell-function mock of iwinfo). The test version just drops the
+# duration arg and runs the rest as a shell command — so the mocked
+# `iwinfo` function gets invoked.
+timeout() { shift; "$@"; }
+
+# Mock 1: iwinfo returns a quoted SSID on sta0
+iwinfo() {
+    case "$1" in
+        sta0) echo 'wlan0     ESSID: "VilaVita_Wi-Fi"' ;;
+        sta1) echo 'wlan1     ESSID: unknown' ;;
+    esac
 }
+result=$(probe_uplink_ssid)
+assert_eq "sta0 SSID extracted" "VilaVita_Wi-Fi" "$result"
 
-# Test ASN-based classification
-result=$(classify_connection '{"as":"AS14593 SpaceX","isp":"SpaceX Services"}')
-assert_eq "Classify Starlink by ASN" "starlink" "$result"
-
-result=$(classify_connection '{"as":"AS40306 ViaSat,Inc.","isp":"ViaSat, Inc."}')
-assert_eq "Classify ViaSat by ASN" "geo_satellite" "$result"
-
-# Test keyword-based classification (when ASN doesn't match)
-result=$(classify_connection '{"as":"AS12345 Unknown","isp":"Starlink Services"}')
-assert_eq "Classify Starlink by keyword" "starlink" "$result"
-
-result=$(classify_connection '{"as":"AS12345 Unknown","isp":"Gogo Inflight"}')
-assert_eq "Classify Gogo by keyword" "airplane" "$result"
-
-result=$(classify_connection '{"as":"AS12345 Unknown","isp":"HughesNet"}')
-assert_eq "Classify HughesNet by keyword" "geo_satellite" "$result"
-
-result=$(classify_connection '{"as":"AS12345 Unknown","isp":"T-Mobile USA"}')
-assert_eq "Classify T-Mobile by keyword" "cellular" "$result"
-
-result=$(classify_connection '{"as":"AS7922 Comcast","isp":"Comcast Cable"}')
-assert_eq "Classify Comcast as landline" "landline" "$result"
-
-echo ""
-
-# --- Test is_random_mac logic ---
-echo "--- is_random_mac tests ---"
-
-is_random_mac() {
-  local mac="$1"
-  local first_byte=$(echo "$mac" | cut -d: -f1)
-  local dec=$(printf "%d" "0x$first_byte" 2>/dev/null || echo 0)
-  [ $((dec & 2)) -ne 0 ]
+# Mock 2: SSID with embedded quotes — iwinfo's awk parser strips ALL quotes
+# (because iwinfo wraps SSIDs in quotes, e.g. ESSID: "Name"). So a quote in
+# the SSID itself is lossy here but cannot break the JSON downstream. The
+# json_escape unit tests above prove escaping handles quotes when it sees
+# them; this test pins down what actually reaches json_escape.
+iwinfo() {
+    case "$1" in
+        sta0) echo 'wlan0     ESSID: "bad"name"' ;;
+        sta1) echo 'wlan1     ESSID: unknown' ;;
+    esac
 }
+result=$(probe_uplink_ssid)
+assert_eq "iwinfo strips embedded quotes" "badname" "$result"
 
-# Test random MACs (bit 1 set in first octet)
-is_random_mac "F2:A6:CB:CD:14:55" && result="random" || result="real"
-assert_eq "F2:xx is random (0xF2 & 2 = 2)" "random" "$result"
+# Mock 3: both interfaces unknown, no UCI → "Not connected"
+iwinfo() { echo 'wlan0     ESSID: unknown'; }
+uci() { return 1; }
+result=$(probe_uplink_ssid)
+assert_eq "all fail -> Not connected" "Not connected" "$result"
 
-is_random_mac "CE:CB:B6:8E:87:62" && result="random" || result="real"
-assert_eq "CE:xx is random (0xCE & 2 = 2)" "random" "$result"
+unset -f iwinfo uci timeout
 
-is_random_mac "D2:CA:22:9E:F1:C5" && result="random" || result="real"
-assert_eq "D2:xx is random (0xD2 & 2 = 2)" "random" "$result"
+############################################################
+section "probe_web (mocked curl)"
+############################################################
 
-# Test real vendor MACs (bit 1 not set)
-is_random_mac "CC:08:FA:61:FB:39" && result="random" || result="real"
-assert_eq "CC:xx is real vendor (0xCC & 2 = 0)" "real" "$result"
+# Mock: curl returns 204 (success)
+curl() { echo "204"; }
+result=$(probe_web 12345)
+assert_match "204 emits int ms"        "^204 [0-9]+$"        "$result"
 
-is_random_mac "00:1A:2B:3C:4D:5E" && result="random" || result="real"
-assert_eq "00:xx is real vendor" "real" "$result"
+# Mock: curl returns "000" (failure) — must strip leading zeros to '0'
+curl() { echo "000"; }
+result=$(probe_web 12345)
+assert_eq "curl 000 -> 0 -1"          "0 -1"                 "$result"
 
-is_random_mac "AC:DE:48:00:11:22" && result="random" || result="real"
-assert_eq "AC:xx is real vendor (0xAC & 2 = 0)" "real" "$result"
+# Mock: curl returns empty (catastrophic failure)
+curl() { echo ""; }
+result=$(probe_web 12345)
+assert_eq "curl empty -> 0 -1"        "0 -1"                 "$result"
 
-echo ""
+# Mock: curl returns valid non-204 (captive portal redirect)
+curl() { echo "302"; }
+result=$(probe_web 12345)
+assert_eq "non-204 -> code -1 ms"     "302 -1"               "$result"
 
-# --- Test history append and format (proposed helper) ---
-echo "--- append_history helper tests ---"
+# Mock: curl returns non-numeric garbage
+curl() { echo "abc"; }
+result=$(probe_web 12345)
+assert_eq "garbage -> 0 -1"           "0 -1"                 "$result"
 
-# Create temp directory for test files
-TEST_DIR="/tmp/dash_daemon_test_$$"
-mkdir -p "$TEST_DIR"
+unset -f curl
 
-MAX_HISTORY=5
+############################################################
+section "probe_ping (mocked ping)"
+############################################################
 
-append_history() {
-  local value="$1"
-  local logfile="$2"
-  echo "$value" >> "$logfile"
-  tail -n $MAX_HISTORY "$logfile" > "${logfile}.tmp" && mv "${logfile}.tmp" "$logfile"
-}
+# Mock: ping returns valid output with float ms
+ping() { echo "PING google.com: 56 data bytes
+64 bytes from 1.2.3.4: seq=0 ttl=118 time=15.916 ms"; }
+result=$(probe_ping)
+assert_eq "ping 15.916ms"             "15.916"   "$result"
 
-format_history_csv() {
-  local logfile="$1"
-  awk 'NF && /^-?[0-9]+$/ {printf "%s%s", sep, $1; sep=","}' "$logfile"
-}
+# Mock: ping returns valid integer ms
+ping() { echo "64 bytes: time=20 ms"; }
+result=$(probe_ping)
+assert_eq "ping int 20ms"             "20"       "$result"
 
-# Test appending and rotation
-TEST_LOG="$TEST_DIR/test.log"
-rm -f "$TEST_LOG"
-touch "$TEST_LOG"
+# Mock: ping returns no time= field (timeout)
+ping() { echo "PING google.com: timeout"; }
+result=$(probe_ping)
+assert_eq "ping timeout -> -1"        "-1"       "$result"
 
-append_history "1" "$TEST_LOG"
-append_history "2" "$TEST_LOG"
-append_history "3" "$TEST_LOG"
+# Mock: ping fails (bad address)
+ping() { return 1; }
+result=$(probe_ping)
+assert_eq "ping fails -> -1"          "-1"       "$result"
 
-result=$(format_history_csv "$TEST_LOG")
-assert_eq "History after 3 appends" "1,2,3" "$result"
+# Mock: ping returns garbage that grep matches but isn't a number
+ping() { echo "time=abc"; }
+result=$(probe_ping)
+assert_eq "ping garbage -> -1"        "-1"       "$result"
 
-append_history "4" "$TEST_LOG"
-append_history "5" "$TEST_LOG"
-append_history "6" "$TEST_LOG"
-append_history "7" "$TEST_LOG"
+unset -f ping
 
-result=$(format_history_csv "$TEST_LOG")
-assert_eq "History rotates to MAX_HISTORY=5" "3,4,5,6,7" "$result"
+############################################################
+section "emit_data_json schema"
+############################################################
 
-result=$(wc -l < "$TEST_LOG" | tr -d ' ')
-assert_eq "Log file has MAX_HISTORY lines" "5" "$result"
+# 1. No args at all — outage doc must be VALID JSON and have all expected keys
+outage=$(emit_data_json)
+assert_valid_json "no-args outage doc parses" "$outage"
+assert_contains  "outage has avail.current 0"    '"current": 0'      "$outage"
+assert_contains  "outage has web.code 0"         '"code": 0'         "$outage"
+assert_contains  "outage has web.ms -1"          '"ms": -1'          "$outage"
+assert_contains  "outage has ping.current -1"    '"current": -1'     "$outage"
+assert_contains  "outage has SSID --"            '"uplink_ssid": "--"' "$outage"
+assert_contains  "outage has uplink connection_type" '"connection_type":"unknown"' "$outage"
+assert_contains  "outage has empty clients.list" '"list": []'        "$outage"
 
-echo ""
+# 2. Full args — every value flows through to output
+full=$(emit_data_json 1700000000 "MyAP" '{"connection_type":"starlink","isp":"SpaceX","thresholds":{"ping":{"good":60,"warn":120},"web":{"good":200,"warn":400}}}' \
+    204 50 "50,60,70" \
+    15.5 "16,15" \
+    100 200 500 1000 "100,200" "300,400" \
+    1 1699999000 "1,1,0,1" \
+    3 100 50 "3,3" '{"mac":"AA:BB:CC:DD:EE:FF","name":"x","ip":"1.2.3.4","iface":"5G","tx":1,"rx":1}')
+assert_valid_json "full doc parses"         "$full"
+assert_contains  "ts populated"          '"ts": 1700000000'   "$full"
+assert_contains  "ssid populated"        '"uplink_ssid": "MyAP"' "$full"
+assert_contains  "uplink populated"      '"connection_type":"starlink"' "$full"
+assert_contains  "web code 204"          '"code": 204'        "$full"
+assert_contains  "web ms 50"             '"ms": 50'           "$full"
+assert_contains  "web history"           '"history": [50,60,70]' "$full"
+assert_contains  "ping 15.5"             '"current": 15.5'    "$full"
+assert_contains  "clients online 3"      '"online": 3'        "$full"
+assert_contains  "client list element"   '"mac":"AA:BB:CC:DD:EE:FF"' "$full"
 
-# --- Test threshold parsing ---
-echo "--- threshold parsing tests ---"
+# 3. JSON-escaped SSID flows through correctly (no extra quoting)
+esc=$(json_escape 'bad"name')
+result=$(emit_data_json 1 "$esc")
+assert_valid_json "escaped SSID stays valid JSON" "$result"
+assert_contains  "escaped SSID literal"  '"uplink_ssid": "bad\"name"' "$result"
 
-parse_thresholds() {
-  local thresholds="$1"
-  local ping_good=$(echo "$thresholds" | cut -d' ' -f1)
-  local ping_warn=$(echo "$thresholds" | cut -d' ' -f2)
-  local web_good=$(echo "$thresholds" | cut -d' ' -f3)
-  local web_warn=$(echo "$thresholds" | cut -d' ' -f4)
-  echo "$ping_good $ping_warn $web_good $web_warn"
-}
+############################################################
+section "classify_by_asn_number"
+############################################################
 
-thresholds=$(get_thresholds "airplane")
-result=$(parse_thresholds "$thresholds")
-assert_eq "Parse airplane thresholds" "775 1100 2000 3500" "$result"
+assert_eq "Starlink 14593"      "starlink"      "$(classify_by_asn_number 'AS14593 SpaceX Services')"
+assert_eq "Gogo 21928"          "airplane"      "$(classify_by_asn_number 'AS21928 Gogo LLC')"
+assert_eq "ViaSat 40306"        "geo_satellite" "$(classify_by_asn_number 'AS40306 ViaSat,Inc.')"
+assert_eq "Marlink 15146"       "maritime"      "$(classify_by_asn_number 'AS15146 Marlink')"
+assert_eq "Unknown empty"       ""              "$(classify_by_asn_number 'AS7922 Comcast' 2>/dev/null)"
 
-# Extract individual values
-ping_good=$(echo "$thresholds" | cut -d' ' -f1)
-assert_eq "Airplane ping_good" "775" "$ping_good"
+############################################################
+section "classify_connection (keyword fallback)"
+############################################################
 
-web_warn=$(echo "$thresholds" | cut -d' ' -f4)
-assert_eq "Airplane web_warn" "3500" "$web_warn"
+assert_eq "Starlink keyword"    "starlink"      "$(classify_connection '"isp":"STARLINK Internet","as":"AS99999"')"
+assert_eq "Gogo keyword"        "airplane"      "$(classify_connection '"isp":"GOGO LLC","as":"AS99999"')"
+assert_eq "Viasat keyword"      "geo_satellite" "$(classify_connection '"isp":"VIASAT","as":"AS99999"')"
+assert_eq "T-Mobile keyword"    "cellular"      "$(classify_connection '"isp":"T-MOBILE USA","as":"AS99999"')"
+assert_eq "Default landline"    "landline"      "$(classify_connection '"isp":"Comcast Cable","as":"AS7922"')"
 
-echo ""
+############################################################
+section "get_thresholds"
+############################################################
 
-# --- Cleanup ---
-rm -rf "$TEST_DIR"
+assert_eq "starlink thresholds" "60 120 200 400"     "$(get_thresholds starlink)"
+assert_eq "airplane thresholds" "775 1100 2000 3500" "$(get_thresholds airplane)"
+assert_eq "geo_sat thresholds"  "775 1100 2000 3500" "$(get_thresholds geo_satellite)"
+assert_eq "cellular thresholds" "80 150 250 500"     "$(get_thresholds cellular)"
+assert_eq "landline default"    "30 80 100 300"      "$(get_thresholds landline)"
+assert_eq "unknown -> default"  "30 80 100 300"      "$(get_thresholds xyz)"
 
-# --- Summary ---
-echo "=== Test Summary ==="
-echo "Tests run: $TESTS_RUN"
-echo "Passed: $TESTS_PASSED"
-echo "Failed: $TESTS_FAILED"
-
+############################################################
+# Summary
+############################################################
+printf "\n========================================\n"
 if [ $TESTS_FAILED -eq 0 ]; then
-  printf "${GREEN}All tests passed!${NC}\n"
-  exit 0
+    printf "${GREEN}All %d tests passed.${NC}\n" "$TESTS_RUN"
+    exit 0
 else
-  printf "${RED}Some tests failed!${NC}\n"
-  exit 1
+    printf "${RED}%d / %d tests FAILED.${NC}\n" "$TESTS_FAILED" "$TESTS_RUN"
+    exit 1
 fi
