@@ -48,9 +48,16 @@ PERSIST_DIR="/overlay/upper/root"
 HEARTBEAT_FILE="$PERSIST_DIR/dash_heartbeat.txt"
 BOOT_LOG="$PERSIST_DIR/dash_boot.log"
 SNAPSHOT_LOG="$PERSIST_DIR/dash_snapshot.log"
-HEARTBEAT_INTERVAL_CYCLES=12    # 12 * 5s = 60s
-SNAPSHOT_MAX_LINES=1500         # ~24h at 1/min
-BOOT_LOG_MAX_BYTES=262144       # 256 KiB — covers many boots
+SHUTDOWN_LOG="$PERSIST_DIR/dash_shutdown.log"
+SYSLOG_TAIL_LOG="$PERSIST_DIR/dash_syslog_tail.log"
+SYSLOG_TAIL_PID="/tmp/dash_syslog_tail.pid"
+PS_SNAPSHOT="$PERSIST_DIR/dash_ps_snapshot.log"
+# Drop to 1 cycle = 5s heartbeats — tighter pre-death window. Flash impact
+# stays modest because each write is tiny (<300 bytes) and we sync only once.
+HEARTBEAT_INTERVAL_CYCLES=1
+SNAPSHOT_MAX_LINES=4000         # ~5.5h at 1/5s
+BOOT_LOG_MAX_BYTES=524288       # 512 KiB
+SYSLOG_TAIL_MAX_BYTES=524288    # 512 KiB rolling
 HEARTBEAT_COUNTER=0
 
 DEFAULT_UPLINK='{"connection_type":"unknown","isp":"Unknown","thresholds":{"ping":{"good":30,"warn":80},"web":{"good":100,"warn":300}}}'
@@ -473,6 +480,10 @@ EOF
 $hw
 EOF
 
+    # ps audit: process count. A spike or a known-bad name suggests something
+    # rogue. Recorded as a single integer in the snapshot line for cheap diff.
+    local proc_count=$(ps 2>/dev/null | wc -l)
+
     {
         printf 'ts=%d uptime=%s load=%s mem_avail_kb=%s temp_milli=%s rss_kb=%s ' \
             "$now" "$up" "$load" "$mem" "$temp" "$rss"
@@ -482,19 +493,69 @@ EOF
             "$e0r" "$e0t" "$e0c"
         printf 'eth1_rx_err=%s eth1_tx_err=%s eth1_crc_err=%s ' \
             "$e1r" "$e1t" "$e1c"
-        printf 'ubi_max_ec=%s entropy=%s\n' "$ec" "$entropy"
+        printf 'ubi_max_ec=%s entropy=%s proc_count=%s\n' "$ec" "$entropy" "$proc_count"
     } > "$HEARTBEAT_FILE.tmp" && mv "$HEARTBEAT_FILE.tmp" "$HEARTBEAT_FILE"
 
-    # Snapshot log keeps positional fields for cheap awk-based delta math later.
-    printf '%d %s %s %s %s %s %s %s %s %s %s %s %s %s %s %s %s %s %s %s\n' \
+    # Snapshot log: 21 positional fields (matches read_hw_state order + proc_count).
+    printf '%d %s %s %s %s %s %s %s %s %s %s %s %s %s %s %s %s %s %s %s %s\n' \
         "$now" "$up" "$load" "$mem" "$temp" "$rss" \
         "$taint" "$nr_run" "$wdt_bark" "$wifi_irq" "$pwmfan_irq" "$err_irq" \
-        "$e0r" "$e0t" "$e0c" "$e1r" "$e1t" "$e1c" "$ec" "$entropy" >> "$SNAPSHOT_LOG"
-    # Rotate occasionally rather than every line (one tail+mv every 50 lines
-    # is plenty; saves writes).
-    if [ $((HEARTBEAT_COUNTER % 50)) -eq 0 ]; then
+        "$e0r" "$e0t" "$e0c" "$e1r" "$e1t" "$e1c" "$ec" "$entropy" "$proc_count" >> "$SNAPSHOT_LOG"
+
+    # `sync` forces page cache to flash. Without this, the last few seconds
+    # of writes are lost when an SoC reset hits — we'd see a stale heartbeat
+    # in the next boot record instead of the true last-known-good moment.
+    sync
+
+    # Rotate snapshot log periodically.
+    if [ $((HEARTBEAT_COUNTER % 240)) -eq 0 ]; then
         tail -n $SNAPSHOT_MAX_LINES "$SNAPSHOT_LOG" > "${SNAPSHOT_LOG}.tmp" \
             && mv "${SNAPSHOT_LOG}.tmp" "$SNAPSHOT_LOG"
+    fi
+}
+
+# record_shutdown <signal>
+#   Called from the SIGTERM/SIGINT trap. Writes to a persistent log BEFORE
+#   exiting. If the next boot's BOOT record shows a SHUTDOWN entry close to
+#   the gap, the reboot was userspace-initiated (orderly). If not, it was
+#   abrupt (hardware reset / SoC wedge).
+record_shutdown() {
+    local sig="$1"
+    local now=$(date +%s)
+    local up=$(awk '{print $1}' /proc/uptime 2>/dev/null)
+    {
+        printf 'ts=%d signal=%s uptime=%s\n' "$now" "$sig" "$up"
+    } >> "$SHUTDOWN_LOG" 2>/dev/null
+    sync 2>/dev/null
+    log "SHUTDOWN signal=$sig at ts=$now uptime=${up}s — logged to flash"
+}
+
+# start_syslog_tail
+#   Background: tail logread -f to a persistent file. Captures the last
+#   moments of kernel + procd + service logs before death. We can't get this
+#   from /var/log on reboot (it's RAM). Rate-limit via periodic rotation.
+start_syslog_tail() {
+    # Don't start if one's already running
+    if [ -f "$SYSLOG_TAIL_PID" ]; then
+        local old_pid=$(cat "$SYSLOG_TAIL_PID")
+        if [ -n "$old_pid" ] && kill -0 "$old_pid" 2>/dev/null; then
+            return 0
+        fi
+    fi
+    # Background tail; write to persistent log; cap size by rotation in
+    # heartbeat path (avoids needing the tail process to do it).
+    ( logread -f >> "$SYSLOG_TAIL_LOG" 2>/dev/null ) &
+    echo $! > "$SYSLOG_TAIL_PID"
+    log "syslog tail started (pid $(cat $SYSLOG_TAIL_PID)) -> $SYSLOG_TAIL_LOG"
+}
+
+# Rotate the syslog tail log if it exceeds cap. Called from collect_data
+# at the same low cadence we rotate snapshots.
+rotate_syslog_tail() {
+    local size=$(wc -c < "$SYSLOG_TAIL_LOG" 2>/dev/null)
+    if [ "${size:-0}" -gt "$SYSLOG_TAIL_MAX_BYTES" ] 2>/dev/null; then
+        tail -c "$SYSLOG_TAIL_MAX_BYTES" "$SYSLOG_TAIL_LOG" > "${SYSLOG_TAIL_LOG}.tmp" \
+            && mv "${SYSLOG_TAIL_LOG}.tmp" "$SYSLOG_TAIL_LOG"
     fi
 }
 
@@ -527,6 +588,13 @@ record_boot() {
         fi
         echo "--- last 10 snapshots before boot ---"
         tail -n 10 "$SNAPSHOT_LOG" 2>/dev/null | sed 's/^/  /'
+        echo "--- shutdown log (presence of recent SHUTDOWN entry = orderly reboot) ---"
+        # If the gap to most-recent SHUTDOWN entry is small, the daemon got
+        # SIGTERM before death (orderly). If the latest entry is much older
+        # than the gap, this was an abrupt reset.
+        tail -n 5 "$SHUTDOWN_LOG" 2>/dev/null | sed 's/^/  /'
+        echo "--- last 50 lines of system logread (captured continuously to flash) ---"
+        tail -n 50 "$SYSLOG_TAIL_LOG" 2>/dev/null | sed 's/^/  /'
         echo "--- pstore (kernel oops/panic if any) ---"
         ls /sys/fs/pstore/ 2>/dev/null | sed 's/^/  /'
         for f in /sys/fs/pstore/*; do
@@ -562,6 +630,9 @@ record_boot() {
         tail -c "$BOOT_LOG_MAX_BYTES" "$BOOT_LOG" > "${BOOT_LOG}.tmp" \
             && mv "${BOOT_LOG}.tmp" "$BOOT_LOG"
     fi
+
+    # Make sure the boot record itself survives a fast follow-up reboot.
+    sync
 
     log "boot recorded: $verdict"
 }
@@ -641,6 +712,11 @@ EOF
 
     # Persistent heartbeat (rate-limited inside the function)
     record_heartbeat "$now"
+
+    # Rotate the syslog-tail log occasionally
+    if [ $((HEARTBEAT_COUNTER % 240)) -eq 1 ]; then
+        rotate_syslog_tail
+    fi
 }
 
 # === INIT & MAIN LOOP ===
@@ -657,10 +733,31 @@ done
 # Initial outage doc so the dashboard never sees a 404 before cycle 1.
 [ ! -s "$JSON_OUT" ] && emit_data_json > "$JSON_OUT"
 
-trap "rm -f $PID_FILE; exit 0" INT TERM
+# SIGTERM/SIGINT trap: log to persistent flash BEFORE exit. If we see a
+# SHUTDOWN entry close to the next boot's heartbeat gap, the reboot was
+# orderly (userspace asked for it). Missing entry = abrupt SoC reset.
+shutdown_handler() {
+    local sig="$1"
+    record_shutdown "$sig"
+    # Stop background syslog tail cleanly
+    if [ -f "$SYSLOG_TAIL_PID" ]; then
+        kill "$(cat "$SYSLOG_TAIL_PID")" 2>/dev/null
+        rm -f "$SYSLOG_TAIL_PID"
+    fi
+    rm -f "$PID_FILE"
+    exit 0
+}
+trap 'shutdown_handler TERM' TERM
+trap 'shutdown_handler INT'  INT
+trap 'shutdown_handler HUP'  HUP
+
+# Start the continuous syslog tail BEFORE recording boot so we don't miss
+# events during the boot-record write itself.
+start_syslog_tail
 
 # Record this boot with forensic snapshot (gap analysis, dmesg, pstore, last
-# snapshots) BEFORE the heartbeat gets overwritten by the first cycle.
+# snapshots, recent shutdowns, syslog tail) BEFORE the heartbeat gets
+# overwritten by the first cycle.
 record_boot
 
 log "Dashboard daemon starting (interval: ${INTERVAL}s, history: ${MAX_HISTORY} samples)"

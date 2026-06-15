@@ -388,7 +388,7 @@ assert_eq "negative ts rejected"       "-1"       "$result"
 section "record_heartbeat"
 ############################################################
 
-# Each call increments counter; only every HEARTBEAT_INTERVAL_CYCLES writes.
+# With HEARTBEAT_INTERVAL_CYCLES=12, no write until call 12.
 HEARTBEAT_COUNTER=0
 HEARTBEAT_INTERVAL_CYCLES=12
 rm -f "$HEARTBEAT_FILE" "$SNAPSHOT_LOG"
@@ -421,12 +421,13 @@ assert_match "heartbeat has taint"     "taint=[0-9]+"     "$content"
 assert_match "heartbeat has wdt_bark"  "wdt_bark=[0-9]+"  "$content"
 assert_match "heartbeat has eth0 errs" "eth0_rx_err=[0-9]+ eth0_tx_err=[0-9]+ eth0_crc_err=[0-9]+" "$content"
 assert_match "heartbeat has entropy"   "entropy=[0-9]+"   "$content"
+assert_match "heartbeat has proc_count" "proc_count=[0-9]+" "$content"
 
-# Snapshot log: 1 line, 20 positional fields
+# Snapshot log: 1 line, 21 positional fields (added proc_count)
 snap_lines=$(wc -l < "$SNAPSHOT_LOG")
 assert_eq "snapshot log line count"    "1"        "$snap_lines"
 snap_fields=$(awk '{print NF; exit}' "$SNAPSHOT_LOG")
-assert_eq "snapshot has 20 positional fields" "20" "$snap_fields"
+assert_eq "snapshot has 21 positional fields" "21" "$snap_fields"
 
 # 11 more calls: still 1 snapshot line, 2nd interval not reached
 i=1
@@ -441,6 +442,22 @@ assert_eq "snapshot only on interval"  "1"        "$snap_lines"
 record_heartbeat 1060
 snap_lines=$(wc -l < "$SNAPSHOT_LOG")
 assert_eq "second interval appends"    "2"        "$snap_lines"
+
+# Final check: with HEARTBEAT_INTERVAL_CYCLES=1 (production setting), every
+# call writes. Reset state — this is independent of the gating tests above.
+HEARTBEAT_COUNTER=0
+HEARTBEAT_INTERVAL_CYCLES=1
+rm -f "$HEARTBEAT_FILE" "$SNAPSHOT_LOG"
+record_heartbeat 2000
+TESTS_RUN=$((TESTS_RUN + 1))
+if [ -f "$HEARTBEAT_FILE" ]; then
+    pass "5s heartbeat (interval=1): writes every call"
+else
+    fail "5s heartbeat" "file exists" "no file"
+fi
+record_heartbeat 2005
+snap_lines=$(wc -l < "$SNAPSHOT_LOG")
+assert_eq "interval=1: 2nd call also writes" "2" "$snap_lines"
 
 ############################################################
 section "record_boot"
@@ -488,6 +505,30 @@ record_boot
 unset -f date
 log_content=$(cat "$BOOT_LOG")
 assert_contains "no heartbeat -> FIRST_RUN" "FIRST_RUN" "$log_content"
+
+############################################################
+section "record_shutdown"
+############################################################
+
+SHUTDOWN_LOG="$SANDBOX/shutdown.log"
+rm -f "$SHUTDOWN_LOG"
+
+record_shutdown TERM
+TESTS_RUN=$((TESTS_RUN + 1))
+if [ -f "$SHUTDOWN_LOG" ]; then pass "shutdown log created"
+else fail "shutdown log created" "file" "missing"; fi
+
+content=$(cat "$SHUTDOWN_LOG")
+assert_match "shutdown ts field"      "^ts=[0-9]+"      "$content"
+assert_match "shutdown signal field"  "signal=TERM"     "$content"
+assert_match "shutdown uptime field"  "uptime=[0-9.]+"  "$content"
+
+# Two consecutive signals append, don't overwrite
+record_shutdown INT
+lines=$(wc -l < "$SHUTDOWN_LOG")
+assert_eq "shutdown log appends, not overwrites" "2" "$lines"
+last=$(tail -1 "$SHUTDOWN_LOG")
+assert_match "second entry has INT" "signal=INT" "$last"
 
 ############################################################
 # Summary
