@@ -39,6 +39,20 @@ LAST_AVAIL_STATE=1
 UPLINK_SSID=""
 AVAIL=0
 
+# === PERSISTENT DIAGNOSTIC LOGGING ===
+# Lives on /overlay/upper (ubifs flash, survives reboot). Heartbeat lets us
+# detect unclean reboots by checking the gap between last write and current
+# boot time. Boot log preserves dmesg/pstore/last-snapshots for postmortem.
+# Flash wear: ~1 write/minute on heartbeat + snapshot, well under UBIFS limits.
+PERSIST_DIR="/overlay/upper/root"
+HEARTBEAT_FILE="$PERSIST_DIR/dash_heartbeat.txt"
+BOOT_LOG="$PERSIST_DIR/dash_boot.log"
+SNAPSHOT_LOG="$PERSIST_DIR/dash_snapshot.log"
+HEARTBEAT_INTERVAL_CYCLES=12    # 12 * 5s = 60s
+SNAPSHOT_MAX_LINES=1500         # ~24h at 1/min
+BOOT_LOG_MAX_BYTES=262144       # 256 KiB — covers many boots
+HEARTBEAT_COUNTER=0
+
 DEFAULT_UPLINK='{"connection_type":"unknown","isp":"Unknown","thresholds":{"ping":{"good":30,"warn":80},"web":{"good":100,"warn":300}}}'
 
 # === HELPERS ===
@@ -387,6 +401,105 @@ probe_clients() {
     echo "$online $total_tx $total_rx"
 }
 
+# === PERSISTENT-LOG HELPERS ===
+
+# read_system_state -> "uptime load mem_avail_kb temp_milli daemon_rss_kb"
+# All numeric, single space-separated line. Sentinel "0" for any unavailable.
+read_system_state() {
+    local up=$(awk '{print $1}' /proc/uptime 2>/dev/null)
+    local load=$(awk '{print $1}' /proc/loadavg 2>/dev/null)
+    local mem=$(awk '/MemAvailable/{print $2}' /proc/meminfo 2>/dev/null)
+    local temp=$(cat /sys/class/thermal/thermal_zone0/temp 2>/dev/null)
+    local rss=$(awk '/VmRSS/{print $2}' /proc/$$/status 2>/dev/null)
+    echo "${up:-0} ${load:-0} ${mem:-0} ${temp:-0} ${rss:-0}"
+}
+
+# heartbeat_gap_seconds <now> -> seconds since last heartbeat (or -1 if none)
+heartbeat_gap_seconds() {
+    local now=$1
+    local last=$(awk -F'[ =]' '/^ts=/{print $2; exit}' "$HEARTBEAT_FILE" 2>/dev/null)
+    case "$last" in
+        ''|*[!0-9]*) echo -1 ;;
+        *) echo $((now - last)) ;;
+    esac
+}
+
+# record_heartbeat <now>
+#   Updates the single-line heartbeat file every $HEARTBEAT_INTERVAL_CYCLES
+#   calls. Also appends a snapshot to the rolling snapshot log.
+record_heartbeat() {
+    local now=$1
+    HEARTBEAT_COUNTER=$((HEARTBEAT_COUNTER + 1))
+    [ $((HEARTBEAT_COUNTER % HEARTBEAT_INTERVAL_CYCLES)) -ne 0 ] && return
+
+    local state=$(read_system_state)
+    local up load mem temp rss
+    read up load mem temp rss <<EOF
+$state
+EOF
+
+    {
+        printf 'ts=%d uptime=%s load=%s mem_avail_kb=%s temp_milli=%s rss_kb=%s\n' \
+            "$now" "$up" "$load" "$mem" "$temp" "$rss"
+    } > "$HEARTBEAT_FILE.tmp" && mv "$HEARTBEAT_FILE.tmp" "$HEARTBEAT_FILE"
+
+    printf '%d %s %s %s %s %s\n' "$now" "$up" "$load" "$mem" "$temp" "$rss" >> "$SNAPSHOT_LOG"
+    # Rotate occasionally rather than every line (one tail+mv every 50 lines
+    # is plenty; saves writes).
+    if [ $((HEARTBEAT_COUNTER % 50)) -eq 0 ]; then
+        tail -n $SNAPSHOT_MAX_LINES "$SNAPSHOT_LOG" > "${SNAPSHOT_LOG}.tmp" \
+            && mv "${SNAPSHOT_LOG}.tmp" "$SNAPSHOT_LOG"
+    fi
+}
+
+# record_boot
+#   Called once at daemon startup. Appends a forensic record to BOOT_LOG with:
+#     - Gap from last heartbeat (large gap = unclean / abrupt reboot)
+#     - dmesg head (kernel boot messages — might mention reset reason)
+#     - pstore dumps (kernel panic / oops survives reboot here, if any)
+#     - Last 10 snapshots before the boot (system state right before death)
+record_boot() {
+    mkdir -p "$PERSIST_DIR"
+    local now=$(date +%s)
+    local gap=$(heartbeat_gap_seconds "$now")
+    local verdict="UNKNOWN"
+    if [ "$gap" -lt 0 ] 2>/dev/null; then
+        verdict="FIRST_RUN (no previous heartbeat)"
+    elif [ "$gap" -le 90 ]; then
+        verdict="CLEAN (gap=${gap}s — within heartbeat interval)"
+    else
+        verdict="ABRUPT (gap=${gap}s — exceeds 90s; system died without warning)"
+    fi
+
+    {
+        echo
+        echo "==================== BOOT $(date) ===================="
+        echo "ts=$now uptime_now=$(awk '{print $1}' /proc/uptime) verdict: $verdict"
+        if [ "$gap" -ge 0 ] 2>/dev/null; then
+            echo "last heartbeat raw:"
+            cat "$HEARTBEAT_FILE" 2>/dev/null | sed 's/^/  /'
+        fi
+        echo "--- last 10 snapshots before boot ---"
+        tail -n 10 "$SNAPSHOT_LOG" 2>/dev/null | sed 's/^/  /'
+        echo "--- pstore (kernel oops/panic if any) ---"
+        ls /sys/fs/pstore/ 2>/dev/null | sed 's/^/  /'
+        for f in /sys/fs/pstore/*; do
+            [ -e "$f" ] && echo "--- $f (first 30 lines) ---" && head -30 "$f" 2>/dev/null | sed 's/^/  /'
+        done
+        echo "--- dmesg first 30 lines ---"
+        dmesg 2>/dev/null | head -30 | sed 's/^/  /'
+    } >> "$BOOT_LOG"
+
+    # Cap boot log size (head -c keeps newest by rewriting from the tail).
+    local size=$(wc -c < "$BOOT_LOG" 2>/dev/null)
+    if [ "${size:-0}" -gt "$BOOT_LOG_MAX_BYTES" ] 2>/dev/null; then
+        tail -c "$BOOT_LOG_MAX_BYTES" "$BOOT_LOG" > "${BOOT_LOG}.tmp" \
+            && mv "${BOOT_LOG}.tmp" "$BOOT_LOG"
+    fi
+
+    log "boot recorded: $verdict"
+}
+
 # compute_avail <web_code> <web_ms> <ping_ms> -> 0 or 1
 compute_avail() {
     if [ "$1" = "204" ] && [ "${2:-0}" -gt 0 ] 2>/dev/null && [ "$3" != "-1" ]; then
@@ -459,6 +572,9 @@ EOF
 
     log "Web:${web_ms}ms Ping:${ping_ms}ms DL:${tx_kbps}K UL:${rx_kbps}K Clients:${clients_online}"
     LAST_AVAIL_STATE=$AVAIL
+
+    # Persistent heartbeat (rate-limited inside the function)
+    record_heartbeat "$now"
 }
 
 # === INIT & MAIN LOOP ===
@@ -476,6 +592,10 @@ done
 [ ! -s "$JSON_OUT" ] && emit_data_json > "$JSON_OUT"
 
 trap "rm -f $PID_FILE; exit 0" INT TERM
+
+# Record this boot with forensic snapshot (gap analysis, dmesg, pstore, last
+# snapshots) BEFORE the heartbeat gets overwritten by the first cycle.
+record_boot
 
 log "Dashboard daemon starting (interval: ${INTERVAL}s, history: ${MAX_HISTORY} samples)"
 

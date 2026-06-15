@@ -329,6 +329,146 @@ assert_eq "landline default"    "30 80 100 300"      "$(get_thresholds landline)
 assert_eq "unknown -> default"  "30 80 100 300"      "$(get_thresholds xyz)"
 
 ############################################################
+section "read_system_state"
+############################################################
+
+# Real call against this host's /proc — should give us 5 numeric fields.
+state=$(read_system_state)
+field_count=$(echo "$state" | awk '{print NF}')
+assert_eq "5 fields"                   "5"        "$field_count"
+assert_match "uptime numeric"          "^[0-9.]+ "        "$state"
+assert_match "load numeric"            "^[^ ]+ [0-9.]+ "  "$state"
+
+############################################################
+section "heartbeat_gap_seconds"
+############################################################
+
+# Override the persistent paths to use the sandbox
+HEARTBEAT_FILE="$SANDBOX/heartbeat.txt"
+SNAPSHOT_LOG="$SANDBOX/snapshot.log"
+BOOT_LOG="$SANDBOX/boot.log"
+PERSIST_DIR="$SANDBOX"
+
+# No file at all -> -1
+rm -f "$HEARTBEAT_FILE"
+result=$(heartbeat_gap_seconds 1000)
+assert_eq "missing heartbeat -> -1"    "-1"       "$result"
+
+# Garbage content -> -1
+echo "not a heartbeat" > "$HEARTBEAT_FILE"
+result=$(heartbeat_gap_seconds 1000)
+assert_eq "garbage heartbeat -> -1"    "-1"       "$result"
+
+# Valid heartbeat at ts=500, now=1000 -> 500
+echo "ts=500 uptime=12.3 load=0.1 mem_avail_kb=200000 temp_milli=45000 rss_kb=1500" > "$HEARTBEAT_FILE"
+result=$(heartbeat_gap_seconds 1000)
+assert_eq "valid heartbeat gap"        "500"      "$result"
+
+# Negative-looking ts (shouldn't happen, but verify regex rejects it)
+echo "ts=-1 uptime=12 load=0.1" > "$HEARTBEAT_FILE"
+result=$(heartbeat_gap_seconds 1000)
+assert_eq "negative ts rejected"       "-1"       "$result"
+
+############################################################
+section "record_heartbeat"
+############################################################
+
+# Each call increments counter; only every HEARTBEAT_INTERVAL_CYCLES writes.
+HEARTBEAT_COUNTER=0
+HEARTBEAT_INTERVAL_CYCLES=12
+rm -f "$HEARTBEAT_FILE" "$SNAPSHOT_LOG"
+
+# First 11 calls: no write
+i=1
+while [ $i -lt 12 ]; do
+    record_heartbeat 1000
+    i=$((i + 1))
+done
+if [ -f "$HEARTBEAT_FILE" ]; then
+    fail "no write before interval" "no file" "file exists"
+else
+    pass "no write before HEARTBEAT_INTERVAL_CYCLES"
+fi
+
+# 12th call: writes
+record_heartbeat 1000
+TESTS_RUN=$((TESTS_RUN + 1))
+if [ -f "$HEARTBEAT_FILE" ]; then
+    pass "writes on interval boundary"
+else
+    fail "writes on interval boundary" "file exists" "no file"
+fi
+
+# Heartbeat file is a single-line ts=... record
+content=$(cat "$HEARTBEAT_FILE")
+assert_match "heartbeat file format"   "^ts=1000 uptime=[0-9.]+ load=" "$content"
+
+# Snapshot log has exactly one line
+snap_lines=$(wc -l < "$SNAPSHOT_LOG")
+assert_eq "snapshot log line count"    "1"        "$snap_lines"
+
+# 11 more calls: still 1 snapshot line, 2nd interval not reached
+i=1
+while [ $i -lt 12 ]; do
+    record_heartbeat 1060
+    i=$((i + 1))
+done
+snap_lines=$(wc -l < "$SNAPSHOT_LOG")
+assert_eq "snapshot only on interval"  "1"        "$snap_lines"
+
+# 24th call (2nd interval) writes
+record_heartbeat 1060
+snap_lines=$(wc -l < "$SNAPSHOT_LOG")
+assert_eq "second interval appends"    "2"        "$snap_lines"
+
+############################################################
+section "record_boot"
+############################################################
+
+# Reset boot log; create a heartbeat at ts=100 and call record_boot.
+# Mock `date +%s` so we control "now". Override `date` with a function that
+# returns 200 for +%s but defers to the real binary otherwise.
+rm -f "$BOOT_LOG"
+echo "ts=100 uptime=50 load=0.1 mem_avail_kb=200000 temp_milli=45000 rss_kb=1500" > "$HEARTBEAT_FILE"
+# Add two snapshots so record_boot can dump them
+echo "100 50 0.1 200000 45000 1500" > "$SNAPSHOT_LOG"
+echo "160 110 0.2 199000 46000 1520" >> "$SNAPSHOT_LOG"
+
+# Mock `date`: `+%s` returns 200; anything else calls real date
+real_date=$(command -v date)
+date() { if [ "$1" = "+%s" ]; then echo 200; else "$real_date" "$@"; fi; }
+
+record_boot
+unset -f date
+
+TESTS_RUN=$((TESTS_RUN + 1))
+if [ -f "$BOOT_LOG" ]; then pass "boot log created"
+else fail "boot log created" "file" "missing"; fi
+
+log_content=$(cat "$BOOT_LOG")
+assert_contains "verdict line present" "verdict:" "$log_content"
+assert_contains "verdict ABRUPT for 100s gap" "ABRUPT" "$log_content"
+assert_contains "last 10 snapshots dumped"    "100 50 0.1" "$log_content"
+assert_contains "second snapshot dumped"      "160 110 0.2" "$log_content"
+
+# Clean run: heartbeat 70s ago is within tolerance — CLEAN verdict
+rm -f "$BOOT_LOG"
+echo "ts=130 uptime=50 load=0.1 mem_avail_kb=200000 temp_milli=45000 rss_kb=1500" > "$HEARTBEAT_FILE"
+date() { if [ "$1" = "+%s" ]; then echo 200; else "$real_date" "$@"; fi; }
+record_boot
+unset -f date
+log_content=$(cat "$BOOT_LOG")
+assert_contains "70s gap -> CLEAN"     "CLEAN" "$log_content"
+
+# No prior heartbeat -> FIRST_RUN
+rm -f "$BOOT_LOG" "$HEARTBEAT_FILE"
+date() { if [ "$1" = "+%s" ]; then echo 200; else "$real_date" "$@"; fi; }
+record_boot
+unset -f date
+log_content=$(cat "$BOOT_LOG")
+assert_contains "no heartbeat -> FIRST_RUN" "FIRST_RUN" "$log_content"
+
+############################################################
 # Summary
 ############################################################
 printf "\n========================================\n"
