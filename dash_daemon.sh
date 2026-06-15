@@ -414,6 +414,36 @@ read_system_state() {
     echo "${up:-0} ${load:-0} ${mem:-0} ${temp:-0} ${rss:-0}"
 }
 
+# read_hw_state -> "taint nr_running wdt_bark wifi_irq pwmfan_irq err_irq eth0_rx_err eth0_tx_err eth0_crc_err eth1_rx_err eth1_tx_err eth1_crc_err ubi_max_ec entropy"
+# Hardware telemetry sampled at heartbeat cadence. Absolute counters so we
+# can compute deltas across boots. Anomalies to watch for:
+#   * taint changes from baseline (4096 = expected OOT module) — new bit = new problem
+#   * wdt_bark > 0   — kernel watchdog growled (system was about to be reset)
+#   * eth_*_err climbing — link-layer issues
+#   * entropy < 256  — RNG starvation can hang TLS / boot
+#   * load_running spike — runaway userspace
+# All values default to "0" if unavailable so the line stays parse-able.
+read_hw_state() {
+    local taint=$(cat /proc/sys/kernel/tainted 2>/dev/null)
+    local nr_running=$(awk '{print $4}' /proc/loadavg 2>/dev/null | cut -d/ -f1)
+    local entropy=$(cat /proc/sys/kernel/random/entropy_avail 2>/dev/null)
+    # IRQ counts: sum across both CPUs. Pattern-match the IRQ source name.
+    local wdt_bark=$(awk '/wdt_bark/{print $2+$3}' /proc/interrupts 2>/dev/null)
+    local wifi_irq=$(awk '/mt7915e/{print $2+$3}' /proc/interrupts 2>/dev/null)
+    local pwmfan_irq=$(awk '/pwm-fan/{print $2+$3}' /proc/interrupts 2>/dev/null)
+    local err_irq=$(awk '/^Err:/{print $2+$3}' /proc/interrupts 2>/dev/null)
+    # Ethernet counters
+    local e0r=$(cat /sys/class/net/eth0/statistics/rx_errors 2>/dev/null)
+    local e0t=$(cat /sys/class/net/eth0/statistics/tx_errors 2>/dev/null)
+    local e0c=$(cat /sys/class/net/eth0/statistics/rx_crc_errors 2>/dev/null)
+    local e1r=$(cat /sys/class/net/eth1/statistics/rx_errors 2>/dev/null)
+    local e1t=$(cat /sys/class/net/eth1/statistics/tx_errors 2>/dev/null)
+    local e1c=$(cat /sys/class/net/eth1/statistics/rx_crc_errors 2>/dev/null)
+    # Flash wear
+    local ec=$(cat /sys/class/ubi/ubi0/max_ec 2>/dev/null)
+    echo "${taint:-0} ${nr_running:-0} ${wdt_bark:-0} ${wifi_irq:-0} ${pwmfan_irq:-0} ${err_irq:-0} ${e0r:-0} ${e0t:-0} ${e0c:-0} ${e1r:-0} ${e1t:-0} ${e1c:-0} ${ec:-0} ${entropy:-0}"
+}
+
 # heartbeat_gap_seconds <now> -> seconds since last heartbeat (or -1 if none)
 heartbeat_gap_seconds() {
     local now=$1
@@ -437,13 +467,29 @@ record_heartbeat() {
     read up load mem temp rss <<EOF
 $state
 EOF
+    local hw=$(read_hw_state)
+    local taint nr_run wdt_bark wifi_irq pwmfan_irq err_irq e0r e0t e0c e1r e1t e1c ec entropy
+    read taint nr_run wdt_bark wifi_irq pwmfan_irq err_irq e0r e0t e0c e1r e1t e1c ec entropy <<EOF
+$hw
+EOF
 
     {
-        printf 'ts=%d uptime=%s load=%s mem_avail_kb=%s temp_milli=%s rss_kb=%s\n' \
+        printf 'ts=%d uptime=%s load=%s mem_avail_kb=%s temp_milli=%s rss_kb=%s ' \
             "$now" "$up" "$load" "$mem" "$temp" "$rss"
+        printf 'taint=%s nr_running=%s wdt_bark=%s wifi_irq=%s pwmfan_irq=%s err_irq=%s ' \
+            "$taint" "$nr_run" "$wdt_bark" "$wifi_irq" "$pwmfan_irq" "$err_irq"
+        printf 'eth0_rx_err=%s eth0_tx_err=%s eth0_crc_err=%s ' \
+            "$e0r" "$e0t" "$e0c"
+        printf 'eth1_rx_err=%s eth1_tx_err=%s eth1_crc_err=%s ' \
+            "$e1r" "$e1t" "$e1c"
+        printf 'ubi_max_ec=%s entropy=%s\n' "$ec" "$entropy"
     } > "$HEARTBEAT_FILE.tmp" && mv "$HEARTBEAT_FILE.tmp" "$HEARTBEAT_FILE"
 
-    printf '%d %s %s %s %s %s\n' "$now" "$up" "$load" "$mem" "$temp" "$rss" >> "$SNAPSHOT_LOG"
+    # Snapshot log keeps positional fields for cheap awk-based delta math later.
+    printf '%d %s %s %s %s %s %s %s %s %s %s %s %s %s %s %s %s %s %s %s\n' \
+        "$now" "$up" "$load" "$mem" "$temp" "$rss" \
+        "$taint" "$nr_run" "$wdt_bark" "$wifi_irq" "$pwmfan_irq" "$err_irq" \
+        "$e0r" "$e0t" "$e0c" "$e1r" "$e1t" "$e1c" "$ec" "$entropy" >> "$SNAPSHOT_LOG"
     # Rotate occasionally rather than every line (one tail+mv every 50 lines
     # is plenty; saves writes).
     if [ $((HEARTBEAT_COUNTER % 50)) -eq 0 ]; then
@@ -486,8 +532,28 @@ record_boot() {
         for f in /sys/fs/pstore/*; do
             [ -e "$f" ] && echo "--- $f (first 30 lines) ---" && head -30 "$f" 2>/dev/null | sed 's/^/  /'
         done
-        echo "--- dmesg first 30 lines ---"
-        dmesg 2>/dev/null | head -30 | sed 's/^/  /'
+        echo "--- hardware state at boot ---"
+        # Taint baseline + full /proc/interrupts + softirqs + reg state +
+        # gpio-keys count (button-pressed reboot would show here) + flash
+        # health. All cheap, single-snapshot — these change rarely so a per-boot
+        # capture is enough; the heartbeat tracks the deltas in between.
+        echo "  taint=$(cat /proc/sys/kernel/tainted 2>/dev/null)  (4096=OOT-only is baseline; anything else = NEW)"
+        echo "  /proc/interrupts:"
+        cat /proc/interrupts 2>/dev/null | sed 's/^/    /'
+        echo "  /proc/softirqs (top):"
+        head -8 /proc/softirqs 2>/dev/null | sed 's/^/    /'
+        echo "  regulators:"
+        for r in /sys/class/regulator/regulator.*; do
+            [ -e "$r/name" ] && printf "    %s state=%s microvolts=%s\n" \
+                "$(cat $r/name)" "$(cat $r/state 2>/dev/null)" "$(cat $r/microvolts 2>/dev/null)"
+        done
+        echo "  flash health: max_ec=$(cat /sys/class/ubi/ubi0/max_ec 2>/dev/null) bad_peb=$(cat /sys/class/ubi/ubi0/bad_peb_count 2>/dev/null)"
+        echo "  entropy_avail=$(cat /proc/sys/kernel/random/entropy_avail 2>/dev/null)"
+        echo "  watchdog: bootstatus=$(cat /sys/class/watchdog/watchdog0/bootstatus 2>/dev/null) timeout=$(cat /sys/class/watchdog/watchdog0/timeout 2>/dev/null)"
+        echo "--- dmesg first 50 lines ---"
+        dmesg 2>/dev/null | head -50 | sed 's/^/  /'
+        echo "--- dmesg: ANY mention of reset/reboot/panic/oops ---"
+        dmesg 2>/dev/null | grep -iE "reset|reboot|panic|oops|fault|warning|error" | head -20 | sed 's/^/  /'
     } >> "$BOOT_LOG"
 
     # Cap boot log size (head -c keeps newest by rewriting from the tail).

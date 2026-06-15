@@ -340,6 +340,21 @@ assert_match "uptime numeric"          "^[0-9.]+ "        "$state"
 assert_match "load numeric"            "^[^ ]+ [0-9.]+ "  "$state"
 
 ############################################################
+section "read_hw_state"
+############################################################
+
+# Real call: should produce 14 fields, every one a non-negative integer.
+hw=$(read_hw_state)
+field_count=$(echo "$hw" | awk '{print NF}')
+assert_eq "14 fields"                  "14"       "$field_count"
+# Every field must match /^[0-9]+$/ (non-negative int). Counter-based.
+all_int=$(echo "$hw" | awk '{
+    for (i=1; i<=NF; i++) if ($i !~ /^[0-9]+$/) { print "BAD@"i":"$i; exit }
+    print "OK"
+}')
+assert_eq "all fields non-negative integers" "OK" "$all_int"
+
+############################################################
 section "heartbeat_gap_seconds"
 ############################################################
 
@@ -399,13 +414,19 @@ else
     fail "writes on interval boundary" "file exists" "no file"
 fi
 
-# Heartbeat file is a single-line ts=... record
+# Heartbeat file is a single-line ts=... record carrying all hw fields
 content=$(cat "$HEARTBEAT_FILE")
-assert_match "heartbeat file format"   "^ts=1000 uptime=[0-9.]+ load=" "$content"
+assert_match "heartbeat ts field"      "^ts=1000 uptime=" "$content"
+assert_match "heartbeat has taint"     "taint=[0-9]+"     "$content"
+assert_match "heartbeat has wdt_bark"  "wdt_bark=[0-9]+"  "$content"
+assert_match "heartbeat has eth0 errs" "eth0_rx_err=[0-9]+ eth0_tx_err=[0-9]+ eth0_crc_err=[0-9]+" "$content"
+assert_match "heartbeat has entropy"   "entropy=[0-9]+"   "$content"
 
-# Snapshot log has exactly one line
+# Snapshot log: 1 line, 20 positional fields
 snap_lines=$(wc -l < "$SNAPSHOT_LOG")
 assert_eq "snapshot log line count"    "1"        "$snap_lines"
+snap_fields=$(awk '{print NF; exit}' "$SNAPSHOT_LOG")
+assert_eq "snapshot has 20 positional fields" "20" "$snap_fields"
 
 # 11 more calls: still 1 snapshot line, 2nd interval not reached
 i=1
