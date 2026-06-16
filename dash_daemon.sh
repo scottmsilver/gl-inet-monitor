@@ -487,7 +487,9 @@ read_system_state() {
 # read_hw_state -> "taint nr_running wdt_bark wifi_irq pwmfan_irq err_irq eth0_rx_err eth0_tx_err eth0_crc_err eth1_rx_err eth1_tx_err eth1_crc_err ubi_max_ec entropy"
 # Hardware telemetry sampled at heartbeat cadence. Absolute counters so we
 # can compute deltas across boots. Anomalies to watch for:
-#   * taint changes from baseline (4096 = expected OOT module) — new bit = new problem
+#   * taint changes from baseline — new bit = new problem. Baseline differs by
+#     firmware: 1 (proprietary module) on GL.iNet vendor, 4096 (out-of-tree
+#     module) on vanilla OpenWrt. Both are benign; watch for *changes*.
 #   * wdt_bark > 0   — kernel watchdog growled (system was about to be reset)
 #   * eth_*_err climbing — link-layer issues
 #   * entropy < 256  — RNG starvation can hang TLS / boot
@@ -498,8 +500,12 @@ read_hw_state() {
     local nr_running=$(awk '{print $4}' /proc/loadavg 2>/dev/null | cut -d/ -f1)
     local entropy=$(cat /proc/sys/kernel/random/entropy_avail 2>/dev/null)
     # IRQ counts: sum across both CPUs. Pattern-match the IRQ source name.
+    # WiFi IRQ name differs by firmware: vanilla OpenWrt labels it "mt7915e";
+    # the GL.iNet vendor (MediaTek SDK) driver registers the MT7915 as a PCIe
+    # device "0000:00:00.0" plus a WED offload coprocessor "ccif_wo_isr" — sum
+    # all of them so the field is populated on both builds.
     local wdt_bark=$(awk '/wdt_bark/{print $2+$3}' /proc/interrupts 2>/dev/null)
-    local wifi_irq=$(awk '/mt7915e/{print $2+$3}' /proc/interrupts 2>/dev/null)
+    local wifi_irq=$(awk '/mt7915e|0000:00:00\.0|ccif_wo_isr/{s+=$2+$3} END{print s+0}' /proc/interrupts 2>/dev/null)
     local pwmfan_irq=$(awk '/pwm-fan/{print $2+$3}' /proc/interrupts 2>/dev/null)
     local err_irq=$(awk '/^Err:/{print $2+$3}' /proc/interrupts 2>/dev/null)
     # Ethernet counters
@@ -668,7 +674,7 @@ record_boot() {
         # gpio-keys count (button-pressed reboot would show here) + flash
         # health. All cheap, single-snapshot — these change rarely so a per-boot
         # capture is enough; the heartbeat tracks the deltas in between.
-        echo "  taint=$(cat /proc/sys/kernel/tainted 2>/dev/null)  (4096=OOT-only is baseline; anything else = NEW)"
+        echo "  taint=$(cat /proc/sys/kernel/tainted 2>/dev/null)  (baseline: 1=vendor proprietary mod, 4096=vanilla OOT mod; other bits = NEW)"
         echo "  /proc/interrupts:"
         cat /proc/interrupts 2>/dev/null | sed 's/^/    /'
         echo "  /proc/softirqs (top):"

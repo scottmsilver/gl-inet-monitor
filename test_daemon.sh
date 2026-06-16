@@ -354,6 +354,31 @@ all_int=$(echo "$hw" | awk '{
 }')
 assert_eq "all fields non-negative integers" "OK" "$all_int"
 
+# wifi_irq pattern must populate on BOTH firmwares. This mirrors the awk
+# expression in read_hw_state: vanilla labels the WiFi IRQ "mt7915e"; the
+# GL.iNet vendor (MediaTek SDK) driver exposes the MT7915 as PCIe
+# "0000:00:00.0" plus a WED offload coprocessor "ccif_wo_isr".
+wifi_irq_sum() {
+    awk '/mt7915e|0000:00:00\.0|ccif_wo_isr/{s+=$2+$3} END{print s+0}' "$1"
+}
+cat > "$SANDBOX/irq_vendor" <<'IRQ'
+           CPU0       CPU1
+  7:    2400683          0     GICv3 237 Level     0000:00:00.0
+  9:       6170          0     GICv3 243 Level     ccif_wo_isr
+ 11:          0          0     GICv3 142 Level     wdt_bark
+ 47:          0          0   mt-eint  29 Edge      pwm-fan
+IRQ
+assert_eq "vendor wifi_irq sums PCIe + WED" "2406853" "$(wifi_irq_sum "$SANDBOX/irq_vendor")"
+cat > "$SANDBOX/irq_vanilla" <<'IRQ'
+           CPU0       CPU1
+ 74:       8165          0     GICv3 237 Level     mt7915e
+ 78:          0          0     GICv3 142 Level     wdt_bark
+IRQ
+assert_eq "vanilla wifi_irq matches mt7915e" "8165" "$(wifi_irq_sum "$SANDBOX/irq_vanilla")"
+echo "  3: 100 200 GICv3 30 Level arch_timer" > "$SANDBOX/irq_none"
+assert_eq "no wifi IRQ line -> 0" "0" "$(wifi_irq_sum "$SANDBOX/irq_none")"
+unset -f wifi_irq_sum
+
 ############################################################
 section "heartbeat_gap_seconds"
 ############################################################
