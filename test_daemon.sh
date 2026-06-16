@@ -531,6 +531,230 @@ last=$(tail -1 "$SHUTDOWN_LOG")
 assert_match "second entry has INT" "signal=INT" "$last"
 
 ############################################################
+section "probe_throughput PRIMARY: gl-clients get_speed (offload-aware)"
+############################################################
+
+# GL.iNet vendor firmware exposes per-client byte accounting via
+# `ubus call gl-clients get_speed`, which captures WED hardware-offloaded
+# traffic that /proc/net/dev misses. Mock both ubus (the data source) and
+# jsonfilter (absent on the dev host) for a deterministic test. speed_rx is
+# the download direction, speed_tx the upload; both bytes/sec.
+ubus() { echo "$MOCK_GETSPEED"; }
+jsonfilter() {
+    # Minimal stand-in: `jsonfilter -e '@.speed_rx'` reads JSON on stdin and
+    # prints the integer value of the named key (empty if absent/non-numeric).
+    local key
+    case "$2" in
+        *speed_rx*) key=speed_rx ;;
+        *speed_tx*) key=speed_tx ;;
+        *) cat; return ;;
+    esac
+    sed -n "s/.*\"$key\"[: ]*\([0-9][0-9]*\).*/\1/p"
+}
+
+# The real 88 Mbps speedtest sample: 11,190,619 B/s down, 65,838 B/s up.
+MOCK_GETSPEED='{ "speed_rx": 11190619, "speed_tx": 65838 }'
+result=$(probe_throughput 1000)
+# tx_kbps (DL) = 11190619*8/1000 = 89524 ; rx_kbps (UL) = 65838*8/1000 = 526
+assert_eq "get_speed: download -> tx_kbps, upload -> rx_kbps" "526 89524 gl-clients" "$result"
+
+MOCK_GETSPEED='{ "speed_rx": 0, "speed_tx": 0 }'
+result=$(probe_throughput 1005)
+assert_eq "get_speed: idle -> 0 0" "0 0 gl-clients" "$result"
+
+# Symmetric check — upload-dominant sample maps to rx_kbps.
+MOCK_GETSPEED='{ "speed_rx": 4000, "speed_tx": 1000 }'
+result=$(probe_throughput 1010)
+# tx_kbps = 4000*8/1000 = 32 (DL) ; rx_kbps = 1000*8/1000 = 8 (UL)
+assert_eq "get_speed: upload-dominant -> rx_kbps" "8 32 gl-clients" "$result"
+
+# Malformed/missing fields → 0 0 but still tagged gl-clients (we got a reply).
+MOCK_GETSPEED='{ "speed_rx": "x" }'
+result=$(probe_throughput 1015)
+assert_eq "get_speed: malformed fields -> 0 0" "0 0 gl-clients" "$result"
+
+unset -f ubus jsonfilter
+unset MOCK_GETSPEED
+
+############################################################
+section "probe_throughput FALLBACK: /proc/net/dev (no gl-clients)"
+############################################################
+
+# When gl-clients is absent (vanilla OpenWrt), the ubus call yields nothing and
+# the probe falls back to /proc/net/dev byte deltas, tagged "proc-net-dev".
+# Mock ubus to emit nothing so this path is exercised deterministically.
+ubus() { return 1; }
+
+# Helper: write a minimal /proc/net/dev fixture for the given iface lines.
+# Header is two lines (the kernel always emits this); body is one line per
+# iface in the order requested. Caller passes "name rx_bytes tx_bytes" tuples.
+# Other counter columns (rx_packets, errs, drops, fifo, frame, compressed,
+# multicast for rx; tx_packets, errs, drops, fifo, colls, carrier, compressed
+# for tx) are 0 — only cols 2 (rx_bytes) and 10 (tx_bytes) matter to the probe.
+write_proc_net_dev() {
+    local file="$1"; shift
+    {
+        echo "Inter-|   Receive                                                |  Transmit"
+        echo " face |bytes    packets errs drop fifo frame compressed multicast|bytes    packets errs drop fifo colls carrier compressed"
+        while [ $# -ge 3 ]; do
+            # iface: rx_bytes rx_packets errs drop fifo frame compressed multicast tx_bytes tx_packets errs drop fifo colls carrier compressed
+            printf "%6s: %s 0 0 0 0 0 0 0 %s 0 0 0 0 0 0 0\n" "$1" "$2" "$3"
+            shift 3
+        done
+    } > "$file"
+}
+
+THRU_CACHE="$SANDBOX/thru_cache"
+PROC_NET_DEV="$SANDBOX/proc_net_dev"
+
+# --- vendor names: ra0 + apclix0 + apcli0 ---
+WIFI_IFACES="ra0 wlan0 wlan1 apclix0 apcli0"
+rm -f "$THRU_CACHE"
+write_proc_net_dev "$PROC_NET_DEV" \
+    lo 100 100 \
+    eth0 9999 9999 \
+    ra0 1000 2000 \
+    apclix0 500 1500
+
+# First call: no cache → 0 0 (otherwise the dashboard would render the boot
+# totals as a fake spike)
+result=$(probe_throughput 1000)
+assert_eq "first call (no cache) -> 0 0" "0 0 proc-net-dev" "$result"
+
+# Cache should now exist with the summed totals (ra0 + apclix0 = 1500 rx, 3500 tx)
+TESTS_RUN=$((TESTS_RUN + 1))
+if [ -f "$THRU_CACHE" ]; then pass "first call writes cache"
+else fail "first call writes cache" "file exists" "no file"; fi
+
+cache_line=$(cat "$THRU_CACHE")
+assert_eq "cache holds vendor totals" "1000 1500 3500" "$cache_line"
+
+# Second call: 10 seconds later, +12500 rx bytes (across ifaces), +25000 tx bytes
+# Expected rx_kbps = 12500 * 8 / 1000 / 10 = 10
+# Expected tx_kbps = 25000 * 8 / 1000 / 10 = 20
+write_proc_net_dev "$PROC_NET_DEV" \
+    lo 100 100 \
+    eth0 9999 9999 \
+    ra0 6000 12000 \
+    apclix0 8000 16500
+result=$(probe_throughput 1010)
+assert_eq "second call: rx/tx kbps from byte delta" "10 20 proc-net-dev" "$result"
+
+# Third call with same byte counters (no traffic) → 0 0
+result=$(probe_throughput 1015)
+assert_eq "no traffic -> 0 0" "0 0 proc-net-dev" "$result"
+
+# Counter rollback (iface bounced) → clamped to 0 instead of huge negative
+write_proc_net_dev "$PROC_NET_DEV" \
+    lo 100 100 \
+    eth0 9999 9999 \
+    ra0 100 200 \
+    apclix0 50 150
+result=$(probe_throughput 1020)
+assert_eq "counter rollback clamps to 0" "0 0 proc-net-dev" "$result"
+
+# --- vanilla OpenWrt names: wlan0 + wlan1 ---
+rm -f "$THRU_CACHE"
+write_proc_net_dev "$PROC_NET_DEV" \
+    lo 100 100 \
+    wlan0 1000 2000 \
+    wlan1 500 1500
+result=$(probe_throughput 2000)
+assert_eq "vanilla first call -> 0 0" "0 0 proc-net-dev" "$result"
+cache_line=$(cat "$THRU_CACHE")
+assert_eq "vanilla cache holds wlan totals" "2000 1500 3500" "$cache_line"
+
+write_proc_net_dev "$PROC_NET_DEV" \
+    lo 100 100 \
+    wlan0 6000 12000 \
+    wlan1 8000 16500
+result=$(probe_throughput 2010)
+assert_eq "vanilla wlan delta -> 10 20" "10 20 proc-net-dev" "$result"
+
+# --- only some interfaces present (vendor router missing apcli0) ---
+rm -f "$THRU_CACHE"
+write_proc_net_dev "$PROC_NET_DEV" \
+    ra0 5000 6000 \
+    apclix0 3000 4000
+result=$(probe_throughput 3000)
+assert_eq "subset of ifaces: first call -> 0 0" "0 0 proc-net-dev" "$result"
+cache_line=$(cat "$THRU_CACHE")
+assert_eq "subset cache sums present ifaces" "3000 8000 10000" "$cache_line"
+
+# --- elapsed=0 guard: clock didn't advance, must not divide by zero ---
+rm -f "$THRU_CACHE"
+write_proc_net_dev "$PROC_NET_DEV" ra0 1000 2000
+probe_throughput 4000 > /dev/null
+write_proc_net_dev "$PROC_NET_DEV" ra0 2250 3500
+result=$(probe_throughput 4000)
+# Treated as 1s elapsed: (1250 * 8 / 1000) = 10, (1500 * 8 / 1000) = 12
+assert_eq "elapsed=0 treated as 1s" "10 12 proc-net-dev" "$result"
+
+# --- no interfaces in /proc/net/dev match → 0 0 (cache stores zeros) ---
+rm -f "$THRU_CACHE"
+write_proc_net_dev "$PROC_NET_DEV" \
+    lo 100 100 \
+    eth0 9999 9999
+result=$(probe_throughput 5000)
+assert_eq "no matching ifaces: first call -> 0 0" "0 0 proc-net-dev" "$result"
+cache_line=$(cat "$THRU_CACHE")
+assert_eq "no matching ifaces: cache zeros" "5000 0 0" "$cache_line"
+result=$(probe_throughput 5010)
+assert_eq "no matching ifaces: still 0 0" "0 0 proc-net-dev" "$result"
+
+unset -f write_proc_net_dev
+
+############################################################
+section "probe_clients direction (mocked ubus + jsonfilter)"
+############################################################
+
+# gl-clients is client-centric (.rx = download, .tx = upload); data.json is
+# router-centric (tx = download ↓, rx = upload ↑). probe_clients must cross-map.
+# Feed one downloading client and assert the emitted totals/list are oriented
+# so tx = download.
+DHCP_LEASES="$SANDBOX/dhcp.leases"; : > "$DHCP_LEASES"
+MOCK_CLIENT_MAC="AA:BB:CC:DD:EE:FF"
+
+ubus() {
+    case "$*" in
+        *"gl-clients list"*)      echo '{"clients":{"present":1}}' ;;  # non-empty; parsed by mocked jsonfilter
+        *"luci-rpc getHostHints"*) echo '{}' ;;
+        *)                         echo "" ;;
+    esac
+}
+# jsonfilter stand-in: return canned values keyed by the -e expression.
+# gl .tx = 50000 B/s (upload), gl .rx = 1000000 B/s (download).
+jsonfilter() {
+    local expr=""
+    while [ $# -gt 0 ]; do case "$1" in -e) shift; expr="$1" ;; esac; shift; done
+    case "$expr" in
+        '@.clients[*].mac') echo "$MOCK_CLIENT_MAC" ;;
+        *.online)           echo "true" ;;
+        *.ip)               echo "192.168.8.50" ;;
+        *.iface)            echo "5G" ;;
+        *.tx)               echo "50000" ;;
+        *.rx)               echo "1000000" ;;
+        *.name)             echo "TestLaptop" ;;
+        *)                  cat >/dev/null 2>&1; echo "" ;;
+    esac
+}
+
+result=$(probe_clients)
+online=$(echo "$result" | awk '{print $1}')
+total_tx=$(echo "$result" | awk '{print $2}')
+total_rx=$(echo "$result" | awk '{print $3}')
+# tx (download) = 1000000*8/1000 = 8000 ; rx (upload) = 50000*8/1000 = 400
+assert_eq "clients: one online"                 "1"    "$online"
+assert_eq "clients: download -> total_tx (↓)"   "8000" "$total_tx"
+assert_eq "clients: upload -> total_rx (↑)"     "400"  "$total_rx"
+client_list=$(cat "$CLIENTS_LIST_FILE" 2>/dev/null)
+assert_contains "clients list: tx=download"     '"tx":8000' "$client_list"
+assert_contains "clients list: rx=upload"       '"rx":400'  "$client_list"
+
+unset -f ubus jsonfilter
+unset MOCK_CLIENT_MAC
+
+############################################################
 # Summary
 ############################################################
 printf "\n========================================\n"

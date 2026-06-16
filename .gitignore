@@ -11,3 +11,6 @@
 # Sensitive
 *.pem
 *.key
+
+# Transient router-side forensic backups (machine-specific, not source)
+preflash-backup/

@@ -24,7 +24,19 @@ PING_LOG="/tmp/ping_history.log"
 THRU_LOG="/tmp/thru_history.log"
 AVAIL_LOG="/tmp/avail_history.log"
 CLIENTS_LOG="/tmp/clients_history.log"
-IW_CACHE="/tmp/iw_stats_cache"
+# Throughput probe cache: single-line "ts rx_bytes tx_bytes" snapshot of the
+# previous cycle's /proc/net/dev totals. Renamed from IW_CACHE since we no
+# longer use `iw dev … station dump` (vendor firmware doesn't ship `iw`).
+THRU_CACHE="/tmp/thru_stats_cache"
+# Source of truth for byte counters. Test code overrides via env var; on the
+# router this is always /proc/net/dev (kernel-maintained, no flow-offload
+# blind spot for the iface itself — only NAT'd packets bypass conntrack, not
+# the iface counters).
+PROC_NET_DEV="${PROC_NET_DEV:-/proc/net/dev}"
+# WiFi interfaces to sample. Covers vendor (ra0=local 5G AP, apclix0=5G
+# uplink, apcli0=2.4G uplink) and vanilla OpenWrt (wlan0/wlan1) names.
+# Non-existent ifaces are silently skipped so the same daemon runs on both.
+WIFI_IFACES="${WIFI_IFACES:-ra0 wlan0 wlan1 apclix0 apcli0}"
 PID_FILE="/tmp/dash_daemon.pid"
 LAST_SUCCESS_FILE="/tmp/last_success.txt"
 UPLINK_CACHE="/tmp/uplink_cache.json"
@@ -217,6 +229,7 @@ emit_data_json() {
     local clients_rx="${20:-0}"
     local clients_hist="${21:-0}"
     local clients_list="${22:-}"
+    local thru_source="${23:-proc-net-dev}"
     cat << EOF
 {
   "ts": $ts,
@@ -229,7 +242,7 @@ emit_data_json() {
     "rx_kbps": $rx_kbps, "tx_kbps": $tx_kbps,
     "rx_peak": $rx_peak, "tx_peak": $tx_peak,
     "rx_history": [$rx_hist], "tx_history": [$tx_hist],
-    "source": "iw-station"
+    "source": "$thru_source"
   },
   "avail": {"current": $avail, "last_success": $last_success, "history": [$avail_hist]},
   "clients": {"online": $clients_online, "total_tx": $clients_tx, "total_rx": $clients_rx, "history": [$clients_hist], "list": [$clients_list]}
@@ -242,13 +255,20 @@ EOF
 # sentinel — never raw shell-out output. Probes are independently testable.
 
 # probe_uplink_ssid -> JSON-escaped SSID string ("Not connected" sentinel)
+# Tries vendor names (apclix0=5G client, apcli0=2.4G client) and upstream
+# vanilla names (sta0, sta1) so the same daemon runs on GL.iNet vendor and
+# upstream OpenWrt builds.
 probe_uplink_ssid() {
-    local ssid
-    ssid=$(timeout 3 iwinfo sta0 info 2>/dev/null | awk -F'ESSID: ' '/ESSID:/{gsub(/"/, "", $2); print $2}')
-    [ -z "$ssid" ] || [ "$ssid" = "unknown" ] && \
-        ssid=$(timeout 3 iwinfo sta1 info 2>/dev/null | awk -F'ESSID: ' '/ESSID:/{gsub(/"/, "", $2); print $2}')
-    [ -z "$ssid" ] || [ "$ssid" = "unknown" ] && ssid=$(uci get wireless.sta.ssid 2>/dev/null)
-    [ -z "$ssid" ] || [ "$ssid" = "unknown" ] && ssid="Not connected"
+    local ssid iface
+    for iface in apclix0 apcli0 sta0 sta1; do
+        ssid=$(timeout 3 iwinfo "$iface" info 2>/dev/null | awk -F'ESSID: ' '/ESSID:/{gsub(/"/, "", $2); print $2; exit}')
+        case "$ssid" in
+            ''|unknown) continue ;;
+            *) json_escape "$ssid"; return ;;
+        esac
+    done
+    ssid=$(uci get wireless.sta.ssid 2>/dev/null)
+    [ -z "$ssid" ] && ssid="Not connected"
     json_escape "$ssid"
 }
 
@@ -290,58 +310,96 @@ probe_ping() {
     awk -v v="$raw" 'BEGIN { if (v ~ /^[0-9]+(\.[0-9]+)?$/) print v; else print -1 }'
 }
 
-# probe_throughput <now> -> "rx_kbps tx_kbps" (ints; sentinels 0).
-# Side effect: refreshes $IW_CACHE for the next call's delta computation.
+# probe_throughput <now> -> "rx_kbps tx_kbps source" (ints + tag).
+#
+# PRIMARY: GL.iNet `gl-clients get_speed` (ubus). GL keeps its own per-client
+# byte accounting (a ring buffer of cumulative bytes) which DOES capture WED
+# hardware-offloaded traffic. /proc/net/dev does NOT: on this MT3000 the uplink
+# receive counter (apclix0) reads literally 0 during an 88 Mbps offloaded
+# download — verified empirically against a real speedtest. This is the exact
+# "standard Linux counters miss traffic" trap AGENTS.md warns about, which the
+# old code dodged via `iw dev … station dump` (unavailable on vendor firmware).
+#
+# get_speed returns bytes/sec. speed_rx is the download direction, speed_tx the
+# upload (the busy direction during a download speedtest is speed_rx). Dashboard
+# convention: tx_kbps = download (DL), rx_kbps = upload (UL) — so the mapping is
+# crossed by name: tx_kbps <- speed_rx, rx_kbps <- speed_tx. Bytes/s -> kbits/s
+# is *8/1000.
+#
+# FALLBACK: /proc/net/dev byte deltas across $WIFI_IFACES (vanilla OpenWrt with
+# no gl-clients). Offload-blind on WED builds, but correct where there's no hw
+# flow offload. First call (no cache) returns "0 0" to avoid a totals-as-rate
+# spike. Side effect: writes "<now> <total_rx> <total_tx>" to $THRU_CACHE.
 probe_throughput() {
-    local now="$1" tmp_file=/tmp/iw_stats_current prev_time elapsed data rx tx
+    local now="$1" cur prev_time prev_rx prev_tx elapsed rx tx
+    local rx_kbps=0 tx_kbps=0
+    local spd dl_bps ul_bps
 
-    for iface in wlan0 wlan1; do
-        timeout 3 iw dev $iface station dump 2>/dev/null | awk '
-            /Station/ { mac=$2 }
-            /rx bytes:/ { rx=$3 }
-            /tx bytes:/ { if(mac && rx) print mac, rx, $3 }
-        '
-    done > "$tmp_file"
-
-    if [ -f "$IW_CACHE.time" ]; then
-        read prev_time < "$IW_CACHE.time"
-    else
-        prev_time=$now
+    # --- primary: GL.iNet gl-clients get_speed (offload-aware) ---
+    spd=$(ubus -t 3 call gl-clients get_speed 2>/dev/null)
+    if [ -n "$spd" ]; then
+        dl_bps=$(echo "$spd" | jsonfilter -e '@.speed_rx' 2>/dev/null)
+        ul_bps=$(echo "$spd" | jsonfilter -e '@.speed_tx' 2>/dev/null)
+        case "$dl_bps" in ''|*[!0-9]*) dl_bps=0 ;; esac
+        case "$ul_bps" in ''|*[!0-9]*) ul_bps=0 ;; esac
+        tx_kbps=$(( dl_bps * 8 / 1000 ))   # download
+        rx_kbps=$(( ul_bps * 8 / 1000 ))   # upload
+        echo "$rx_kbps $tx_kbps gl-clients"
+        return
     fi
-    elapsed=$((now - prev_time))
-    [ $elapsed -lt 1 ] && elapsed=1
 
-    data=$(awk -v cachefile="$IW_CACHE" -v elapsed="$elapsed" '
-    BEGIN {
-        while((getline line < cachefile) > 0) {
-            split(line, f, " ")
-            if(f[1]) { prev_rx[f[1]] = f[2]; prev_tx[f[1]] = f[3] }
+    # --- fallback: /proc/net/dev byte deltas ---
+    # Sum current rx/tx across all configured ifaces that show up in
+    # /proc/net/dev. Format of that file is "<iface>: rx_bytes rx_packets …
+    # tx_bytes tx_packets …" — rx_bytes is col 2, tx_bytes is col 10 of the
+    # 16 stat fields after the colon. We strip the colon to make awk fields
+    # line up, so iface name becomes $1 and rx_bytes is $2, tx_bytes is $10.
+    cur=$(awk -v ifaces=" $WIFI_IFACES " '
+        { sub(/:/, " ") }
+        {
+            want = " " $1 " "
+            if (index(ifaces, want)) {
+                total_rx += $2 + 0
+                total_tx += $10 + 0
+            }
         }
-        close(cachefile)
-        total_up = 0; total_down = 0
-    }
-    {
-        mac = $1; rx = $2; tx = $3
-        if(mac in prev_rx) {
-            d_up = int((rx - prev_rx[mac]) * 8 / elapsed / 1000)
-            d_down = int((tx - prev_tx[mac]) * 8 / elapsed / 1000)
-            if(d_up < 0) d_up = 0
-            if(d_down < 0) d_down = 0
-        } else { d_up = 0; d_down = 0 }
-        total_up += d_up; total_down += d_down
-    }
-    END { print total_up, total_down }
-    ' "$tmp_file")
+        END { printf "%d %d\n", total_rx + 0, total_tx + 0 }
+    ' "$PROC_NET_DEV" 2>/dev/null)
 
-    cp "$tmp_file" "$IW_CACHE"
-    echo "$now" > "$IW_CACHE.time"
-
-    read rx tx <<EOF
-$data
+    local cur_rx cur_tx
+    read cur_rx cur_tx <<EOF
+$cur
 EOF
-    case "$rx" in ''|*[!0-9]*) rx=0 ;; *) rx=$(printf '%d' "$rx") ;; esac
-    case "$tx" in ''|*[!0-9]*) tx=0 ;; *) tx=$(printf '%d' "$tx") ;; esac
-    echo "$rx $tx"
+    case "$cur_rx" in ''|*[!0-9]*) cur_rx=0 ;; esac
+    case "$cur_tx" in ''|*[!0-9]*) cur_tx=0 ;; esac
+
+    # First call: no cache → emit "0 0" so the dashboard isn't misled by a
+    # totals-as-rate spike (a fresh boot's "62 GB since uptime" would render
+    # as a fictitious 99 Gbps blip otherwise).
+    if [ -f "$THRU_CACHE" ]; then
+        read prev_time prev_rx prev_tx < "$THRU_CACHE"
+        case "$prev_time" in ''|*[!0-9]*) prev_time=0 ;; esac
+        case "$prev_rx" in ''|*[!0-9]*) prev_rx=0 ;; esac
+        case "$prev_tx" in ''|*[!0-9]*) prev_tx=0 ;; esac
+
+        elapsed=$((now - prev_time))
+        [ $elapsed -lt 1 ] && elapsed=1
+
+        # Counters can wrap (32-bit on some kernels) or reset (iface down/up).
+        # Either case shows up as a negative delta — clamp to 0 instead of
+        # emitting a wild rate.
+        if [ "$cur_rx" -ge "$prev_rx" ] 2>/dev/null; then
+            rx_kbps=$(( (cur_rx - prev_rx) * 8 / 1000 / elapsed ))
+        fi
+        if [ "$cur_tx" -ge "$prev_tx" ] 2>/dev/null; then
+            tx_kbps=$(( (cur_tx - prev_tx) * 8 / 1000 / elapsed ))
+        fi
+    fi
+
+    # Persist current totals for next cycle's delta.
+    echo "$now $cur_rx $cur_tx" > "$THRU_CACHE"
+
+    echo "$rx_kbps $tx_kbps proc-net-dev"
 }
 
 # probe_clients -> "online total_tx total_rx" (ints).
@@ -370,12 +428,17 @@ probe_clients() {
 
         local ip=$(echo "$clients_raw" | jsonfilter -e "@.clients[\"$mac\"].ip" 2>/dev/null)
         local iface=$(echo "$clients_raw" | jsonfilter -e "@.clients[\"$mac\"].iface" 2>/dev/null)
-        local tx=$(echo "$clients_raw" | jsonfilter -e "@.clients[\"$mac\"].tx" 2>/dev/null)
-        local rx=$(echo "$clients_raw" | jsonfilter -e "@.clients[\"$mac\"].rx" 2>/dev/null)
+        # gl-clients is client-centric: .rx = bytes the client received
+        # (download), .tx = bytes it sent (upload). The dashboard's data.json
+        # convention is router-centric — tx = download (↓), rx = upload (↑) —
+        # matching the throughput field. So cross-map here: emit tx <- gl .rx,
+        # rx <- gl .tx. (Both are instantaneous speeds in bytes/sec.)
+        local gl_tx=$(echo "$clients_raw" | jsonfilter -e "@.clients[\"$mac\"].tx" 2>/dev/null)
+        local gl_rx=$(echo "$clients_raw" | jsonfilter -e "@.clients[\"$mac\"].rx" 2>/dev/null)
         local gl_name=$(echo "$clients_raw" | jsonfilter -e "@.clients[\"$mac\"].name" 2>/dev/null)
 
-        tx=$((${tx:-0} * 8 / 1000))
-        rx=$((${rx:-0} * 8 / 1000))
+        local tx=$((${gl_rx:-0} * 8 / 1000))   # download
+        local rx=$((${gl_tx:-0} * 8 / 1000))   # upload
 
         local name=""
         [ -n "$gl_name" ] && name="$gl_name"
@@ -662,8 +725,8 @@ EOF
 
     local ping_ms=$(probe_ping)
 
-    local rx_kbps tx_kbps
-    read rx_kbps tx_kbps <<EOF
+    local rx_kbps tx_kbps thru_source
+    read rx_kbps tx_kbps thru_source <<EOF
 $(probe_throughput "$now")
 EOF
 
@@ -704,6 +767,7 @@ EOF
         "$rx_kbps" "$tx_kbps" "$rx_peak" "$tx_peak" "$rx_hist" "$tx_hist" \
         "$AVAIL" "$last_success" "$avail_hist" \
         "$clients_online" "$clients_tx" "$clients_rx" "$clients_hist" "$clients_list" \
+        "$thru_source" \
         > "${JSON_OUT}.tmp"
     mv "${JSON_OUT}.tmp" "$JSON_OUT"
 
