@@ -1,0 +1,237 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Beryl AX — Reboot Forensics</title>
+<style>
+  :root {
+    --bg:#0d1117; --panel:#161b22; --line:#21262d; --txt:#c9d1d9; --dim:#8b949e;
+    --green:#3fb950; --red:#f85149; --amber:#d29922; --blue:#58a6ff; --purple:#a78bfa;
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--txt);
+         font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif; }
+  header { padding:16px 20px; border-bottom:1px solid var(--line);
+           display:flex; align-items:baseline; gap:14px; flex-wrap:wrap; }
+  header h1 { font-size:18px; margin:0; font-weight:600; }
+  header .sub { color:var(--dim); font-size:12px; }
+  header a { color:var(--blue); text-decoration:none; font-size:12px; margin-left:auto; }
+  .wrap { padding:20px; max-width:1100px; margin:0 auto; }
+  .cards { display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:12px; margin-bottom:22px; }
+  .card { background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:14px 16px; }
+  .card .label { color:var(--dim); font-size:11px; text-transform:uppercase; letter-spacing:.04em; }
+  .card .val { font-size:24px; font-weight:600; margin-top:4px; }
+  .card .val small { font-size:13px; color:var(--dim); font-weight:400; }
+  h2 { font-size:13px; text-transform:uppercase; letter-spacing:.05em; color:var(--dim);
+       margin:26px 0 10px; font-weight:600; }
+  table { width:100%; border-collapse:collapse; background:var(--panel);
+          border:1px solid var(--line); border-radius:8px; overflow:hidden; }
+  th,td { padding:9px 14px; text-align:left; border-bottom:1px solid var(--line); font-size:13px; }
+  th { color:var(--dim); font-weight:600; font-size:11px; text-transform:uppercase; letter-spacing:.04em; }
+  tr:last-child td { border-bottom:none; }
+  .badge { display:inline-block; padding:2px 9px; border-radius:11px; font-size:11px; font-weight:600; }
+  .badge.CLEAN     { background:rgba(63,185,80,.15);  color:var(--green); }
+  .badge.ABRUPT    { background:rgba(248,81,73,.15);   color:var(--red);   }
+  .badge.FIRST_RUN { background:rgba(139,148,158,.15); color:var(--dim);   }
+  .badge.UNKNOWN   { background:rgba(210,153,34,.15);  color:var(--amber); }
+  .charts { display:grid; grid-template-columns:repeat(auto-fit,minmax(240px,1fr)); gap:12px; }
+  .chart { background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:12px 14px; }
+  .chart .head { display:flex; justify-content:space-between; align-items:baseline; }
+  .chart .name { color:var(--dim); font-size:12px; }
+  .chart .cur { font-size:18px; font-weight:600; }
+  .chart canvas { width:100%; height:48px; display:block; margin-top:6px; }
+  .chart .mm { color:var(--dim); font-size:10px; display:flex; justify-content:space-between; margin-top:2px; }
+  .hw { display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:8px; }
+  .hw .kv { background:var(--panel); border:1px solid var(--line); border-radius:6px; padding:8px 11px; }
+  .hw .kv .k { color:var(--dim); font-size:11px; }
+  .hw .kv .v { font-size:15px; font-weight:600; }
+  .hw .kv.warn .v { color:var(--red); }
+  .empty { color:var(--dim); padding:18px; text-align:center; }
+  .err { color:var(--red); padding:10px 0; font-size:12px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Beryl AX — Reboot Forensics</h1>
+  <span class="sub" id="genTime">loading…</span>
+  <a href="/dash2.html">← live dashboard</a>
+</header>
+<div class="wrap">
+  <div class="cards" id="cards"></div>
+  <div id="errBox"></div>
+
+  <h2>Reboot history</h2>
+  <table id="bootTable">
+    <thead><tr><th>Boot time</th><th>Verdict</th><th>Downtime gap</th><th>Uptime at record</th></tr></thead>
+    <tbody id="bootBody"><tr><td colspan="4" class="empty">loading…</td></tr></tbody>
+  </table>
+
+  <h2>Hardware telemetry (last ~10 min)</h2>
+  <div class="charts" id="charts"></div>
+
+  <h2>Current hardware snapshot</h2>
+  <div class="hw" id="hw"></div>
+</div>
+
+<script>
+const FEED = '/reboots.json';
+
+function fmtDuration(s) {
+  s = Math.max(0, Math.floor(s));
+  const d = Math.floor(s/86400), h = Math.floor(s%86400/3600), m = Math.floor(s%3600/60);
+  if (d > 0) return `${d}d ${h}h ${m}m`;
+  if (h > 0) return `${h}h ${m}m`;
+  return `${m}m ${s%60}s`;
+}
+function fmtTime(epoch) {
+  if (!epoch) return '—';
+  const dt = new Date(epoch * 1000);
+  return dt.toLocaleString([], {month:'short', day:'numeric', hour:'2-digit', minute:'2-digit', second:'2-digit'});
+}
+function fmtGap(g) {
+  if (g < 0) return '<span style="color:var(--dim)">—</span>';
+  if (g <= 90) return `${g}s`;
+  return `<span style="color:var(--red)">${fmtDuration(g)} down</span>`;
+}
+
+function sparkline(canvas, data, color) {
+  const dpr = window.devicePixelRatio || 1;
+  const w = canvas.clientWidth, h = 48;
+  canvas.width = w * dpr; canvas.height = h * dpr;
+  const ctx = canvas.getContext('2d'); ctx.scale(dpr, dpr);
+  ctx.clearRect(0, 0, w, h);
+  if (!data || data.length < 2) return;
+  let min = Math.min(...data), max = Math.max(...data);
+  if (max === min) { max = min + 1; }
+  const pad = 4, span = max - min, n = data.length;
+  const x = i => (i / (n - 1)) * (w - 2*pad) + pad;
+  const y = v => h - pad - ((v - min) / span) * (h - 2*pad);
+  // area fill
+  ctx.beginPath(); ctx.moveTo(x(0), h);
+  data.forEach((v, i) => ctx.lineTo(x(i), y(v)));
+  ctx.lineTo(x(n-1), h); ctx.closePath();
+  ctx.fillStyle = color + '22'; ctx.fill();
+  // line
+  ctx.beginPath();
+  data.forEach((v, i) => i ? ctx.lineTo(x(i), y(v)) : ctx.moveTo(x(i), y(v)));
+  ctx.strokeStyle = color; ctx.lineWidth = 1.5; ctx.stroke();
+}
+
+const SERIES = [
+  { key:'temp_c',   name:'Temp',     color:'#f85149', unit:'°C', fix:1 },
+  { key:'load',     name:'Load avg', color:'#58a6ff', unit:'',   fix:2 },
+  { key:'mem_mb',   name:'Mem free', color:'#3fb950', unit:'MB', fix:0 },
+  { key:'wifi_irq', name:'WiFi IRQ', color:'#a78bfa', unit:'',   fix:0, delta:true },
+];
+
+// fields worth flagging red if non-zero
+const HW_WARN = ['wdt_bark','err_irq','eth0_rx_err','eth0_tx_err','eth0_crc_err',
+                 'eth1_rx_err','eth1_tx_err','eth1_crc_err'];
+const HW_ORDER = ['load','temp_milli','mem_avail_kb','nr_running','proc_count','taint',
+                  'wdt_bark','wifi_irq','err_irq','entropy','ubi_max_ec',
+                  'eth0_rx_err','eth1_rx_err'];
+const HW_LABEL = {
+  load:'load', temp_milli:'temp °C', mem_avail_kb:'mem free MB', nr_running:'running',
+  proc_count:'processes', taint:'taint', wdt_bark:'wdt bark', wifi_irq:'wifi irq',
+  err_irq:'err irq', entropy:'entropy', ubi_max_ec:'flash max_ec',
+  eth0_rx_err:'eth0 rx err', eth1_rx_err:'eth1 rx err',
+};
+function hwDisplay(k, v) {
+  if (k === 'temp_milli') return (v/1000).toFixed(1);
+  if (k === 'mem_avail_kb') return Math.round(v/1024);
+  return v;
+}
+
+async function refresh() {
+  let feed;
+  try {
+    const r = await fetch(FEED + '?t=' + Date.now(), {cache:'no-store'});
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    feed = await r.json();
+    document.getElementById('errBox').innerHTML = '';
+  } catch (e) {
+    document.getElementById('errBox').innerHTML =
+      `<div class="err">Could not load ${FEED}: ${e.message}. Is the daemon running?</div>`;
+    return;
+  }
+
+  document.getElementById('genTime').textContent = 'updated ' + fmtTime(feed.generated);
+
+  const boots = feed.boots || [];
+  const abrupt = boots.filter(b => b.verdict === 'ABRUPT').length;
+  const reboots = boots.filter(b => b.verdict !== 'FIRST_RUN' && b.gap > 90).length + abrupt;
+  const last = boots.length ? boots[boots.length - 1] : null;
+
+  document.getElementById('cards').innerHTML = `
+    <div class="card"><div class="label">Current uptime</div>
+      <div class="val">${fmtDuration(feed.uptime)}</div></div>
+    <div class="card"><div class="label">Boot records</div>
+      <div class="val">${boots.length}</div></div>
+    <div class="card"><div class="label">Abrupt reboots</div>
+      <div class="val" style="color:${abrupt? 'var(--red)':'var(--green)'}">${abrupt}</div></div>
+    <div class="card"><div class="label">Last boot</div>
+      <div class="val"><span class="badge ${last?last.verdict:'UNKNOWN'}">${last?last.verdict:'—'}</span></div></div>
+  `;
+
+  // Reboot history — newest first
+  const body = document.getElementById('bootBody');
+  if (!boots.length) {
+    body.innerHTML = '<tr><td colspan="4" class="empty">No boot records yet</td></tr>';
+  } else {
+    body.innerHTML = boots.slice().reverse().map(b => {
+      const bootTime = b.ts - b.uptime; // approx wall-clock of boot
+      return `<tr>
+        <td>${fmtTime(bootTime)}</td>
+        <td><span class="badge ${b.verdict}">${b.verdict}</span></td>
+        <td>${fmtGap(b.gap)}</td>
+        <td>${fmtDuration(b.uptime)}</td>
+      </tr>`;
+    }).join('');
+  }
+
+  // Telemetry charts
+  const t = feed.telemetry || {};
+  document.getElementById('charts').innerHTML = SERIES.map(s => {
+    let series = t[s.key] || [];
+    if (s.delta && series.length > 1) {
+      // IRQ counters are cumulative — show per-sample delta (rate-ish)
+      const d = []; for (let i = 1; i < series.length; i++) d.push(Math.max(0, series[i]-series[i-1]));
+      series = d;
+    }
+    const cur = series.length ? series[series.length-1] : 0;
+    const min = series.length ? Math.min(...series) : 0;
+    const max = series.length ? Math.max(...series) : 0;
+    return `<div class="chart">
+      <div class="head"><span class="name">${s.name}</span>
+        <span class="cur" style="color:${s.color}">${Number(cur).toFixed(s.fix)}<small style="font-size:11px;color:var(--dim)"> ${s.unit}</small></span></div>
+      <canvas data-key="${s.key}"></canvas>
+      <div class="mm"><span>min ${Number(min).toFixed(s.fix)}</span><span>max ${Number(max).toFixed(s.fix)}</span></div>
+    </div>`;
+  }).join('');
+  SERIES.forEach(s => {
+    const cv = document.querySelector(`canvas[data-key="${s.key}"]`);
+    if (!cv) return;
+    let series = t[s.key] || [];
+    if (s.delta && series.length > 1) {
+      const d = []; for (let i = 1; i < series.length; i++) d.push(Math.max(0, series[i]-series[i-1]));
+      series = d;
+    }
+    sparkline(cv, series, s.color);
+  });
+
+  // Current hardware snapshot
+  const cur = feed.current || {};
+  document.getElementById('hw').innerHTML = HW_ORDER.filter(k => k in cur).map(k => {
+    const warn = HW_WARN.includes(k) && Number(cur[k]) > 0;
+    return `<div class="kv${warn?' warn':''}"><div class="k">${HW_LABEL[k]||k}</div>
+      <div class="v">${hwDisplay(k, cur[k])}</div></div>`;
+  }).join('') || '<div class="empty">No heartbeat data</div>';
+}
+
+refresh();
+setInterval(refresh, 10000);
+window.addEventListener('resize', refresh);
+</script>
+</body>
+</html>

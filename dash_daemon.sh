@@ -19,6 +19,10 @@ UPLINK_DETECT_INTERVAL=60
 HINTS_CACHE_AGE=60
 
 JSON_OUT="/www/data.json"
+# Reboot-history + telemetry feed for dash3.html. Boot history changes only on
+# reboot; telemetry refreshes each cycle. Published at a slow cadence.
+REBOOTS_OUT="/www/reboots.json"
+REBOOTS_PUBLISH_INTERVAL_CYCLES=6   # every ~30s at 5s cadence
 FETCH_LOG="/tmp/fetch_history.log"
 PING_LOG="/tmp/ping_history.log"
 THRU_LOG="/tmp/thru_history.log"
@@ -783,10 +787,65 @@ EOF
     # Persistent heartbeat (rate-limited inside the function)
     record_heartbeat "$now"
 
+    # Refresh the reboot/telemetry feed at a slow cadence (boot history rarely
+    # changes; telemetry trend tolerates ~30s staleness on a forensics page).
+    if [ $((HEARTBEAT_COUNTER % REBOOTS_PUBLISH_INTERVAL_CYCLES)) -eq 0 ]; then
+        publish_reboots "$now"
+    fi
+
     # Rotate the syslog-tail log occasionally
     if [ $((HEARTBEAT_COUNTER % 240)) -eq 1 ]; then
         rotate_syslog_tail
     fi
+}
+
+# publish_reboots <now>
+# Publishes boot history + recent hardware telemetry to $REBOOTS_OUT (served
+# JSON) so dash3.html can render reboot forensics without shell access.
+# Shape: {generated, uptime, current{<heartbeat k=v as numbers>},
+#         boots[{ts,uptime,verdict,gap}], telemetry{parallel arrays for charts}}
+publish_reboots() {
+    local now="$1"
+    local uptime_now=$(awk '{print int($1)}' /proc/uptime 2>/dev/null)
+
+    # Boot events (chronological). Each BOOT record's header line looks like:
+    #   ts=<n> uptime_now=<f> verdict: CLEAN|ABRUPT|FIRST_RUN (gap=<n>s ...)
+    local boots=$(awk '
+        /^ts=[0-9]+ uptime_now=.*verdict:/ {
+            ts=""; up=0; v=""; gap=-1
+            for (i=1;i<=NF;i++) {
+                if ($i ~ /^ts=/)         { x=$i; sub(/ts=/,"",x); ts=x }
+                if ($i ~ /^uptime_now=/) { x=$i; sub(/uptime_now=/,"",x); up=int(x) }
+            }
+            if (match($0, /verdict: [A-Z_]+/)) v=substr($0,RSTART+9,RLENGTH-9)
+            if (match($0, /gap=[0-9]+/))       gap=substr($0,RSTART+4,RLENGTH-4)+0
+            if (ts != "") { printf "%s{\"ts\":%s,\"uptime\":%s,\"verdict\":\"%s\",\"gap\":%s}", sep, ts, up, v, gap; sep="," }
+        }
+    ' "$BOOT_LOG" 2>/dev/null)
+
+    # Telemetry: last 120 snapshots -> parallel arrays. snapshot columns:
+    # 1ts 2uptime 3load 4mem_avail_kb 5temp_milli ... 8nr_running 10wifi_irq ... 21proc_count
+    local telem=$(tail -n 120 "$SNAPSHOT_LOG" 2>/dev/null | awk '
+        BEGIN { n=0 }
+        NF>=21 { t[n]=$1; ld[n]=$3; mem[n]=$4; tmp[n]=$5; wi[n]=$10; pc[n]=$21; n++ }
+        END {
+            printf "\"ts\":[";       for(i=0;i<n;i++)printf "%s%s",(i?",":""),t[i];        printf "],"
+            printf "\"load\":[";     for(i=0;i<n;i++)printf "%s%s",(i?",":""),ld[i];       printf "],"
+            printf "\"mem_mb\":[";   for(i=0;i<n;i++)printf "%s%.0f",(i?",":""),mem[i]/1024; printf "],"
+            printf "\"temp_c\":[";   for(i=0;i<n;i++)printf "%s%.1f",(i?",":""),tmp[i]/1000; printf "],"
+            printf "\"wifi_irq\":["; for(i=0;i<n;i++)printf "%s%s",(i?",":""),wi[i];       printf "],"
+            printf "\"proc\":[";     for(i=0;i<n;i++)printf "%s%s",(i?",":""),pc[i];       printf "]"
+        }
+    ')
+
+    # Current heartbeat line ("k=v k=v …", all numeric) -> JSON object.
+    local current=$(awk '{
+        for(i=1;i<=NF;i++){ n=split($i,kv,"="); if(n==2 && kv[2]!="") { printf "%s\"%s\":%s",sep,kv[1],kv[2]; sep="," } }
+    }' "$HEARTBEAT_FILE" 2>/dev/null)
+
+    printf '{"generated":%s,"uptime":%s,"current":{%s},"boots":[%s],"telemetry":{%s}}\n' \
+        "$now" "${uptime_now:-0}" "$current" "$boots" "$telem" > "${REBOOTS_OUT}.tmp"
+    mv "${REBOOTS_OUT}.tmp" "$REBOOTS_OUT"
 }
 
 # === INIT & MAIN LOOP ===
@@ -829,6 +888,9 @@ start_syslog_tail
 # snapshots, recent shutdowns, syslog tail) BEFORE the heartbeat gets
 # overwritten by the first cycle.
 record_boot
+
+# Publish reboot history immediately so dash3.html isn't empty before cycle 1.
+publish_reboots "$(date +%s)"
 
 log "Dashboard daemon starting (interval: ${INTERVAL}s, history: ${MAX_HISTORY} samples)"
 

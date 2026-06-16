@@ -63,6 +63,7 @@ SCRIPT_DIR=$(dirname "$0")
 # Override paths to use a sandbox so tests don't trample real router state.
 SANDBOX=$(mktemp -d 2>/dev/null || mktemp -d -t dashtest)
 JSON_OUT="$SANDBOX/data.json"
+REBOOTS_OUT="$SANDBOX/reboots.json"
 FETCH_LOG="$SANDBOX/fetch.log"
 PING_LOG="$SANDBOX/ping.log"
 THRU_LOG="$SANDBOX/thru.log"
@@ -778,6 +779,47 @@ assert_contains "clients list: rx=upload"       '"rx":400'  "$client_list"
 
 unset -f ubus jsonfilter
 unset MOCK_CLIENT_MAC
+
+############################################################
+section "publish_reboots (boot history + telemetry feed)"
+############################################################
+
+REBOOTS_OUT="$SANDBOX/reboots.json"
+BOOT_LOG="$SANDBOX/boot.log"
+SNAPSHOT_LOG="$SANDBOX/snapshot.log"
+HEARTBEAT_FILE="$SANDBOX/hb.txt"
+
+# 3 boots: FIRST_RUN (no gap), CLEAN (gap=6), ABRUPT (gap=240).
+cat > "$BOOT_LOG" <<'BL'
+==================== BOOT Mon Jun 16 ====================
+ts=1000 uptime_now=50.12 verdict: FIRST_RUN (no previous heartbeat)
+  unrelated forensic line
+==================== BOOT Mon Jun 16 ====================
+ts=2000 uptime_now=700.50 verdict: CLEAN (gap=6s — within heartbeat interval)
+==================== BOOT Mon Jun 16 ====================
+ts=3000 uptime_now=55.00 verdict: ABRUPT (gap=240s — exceeds 90s; system died without warning)
+BL
+
+# snapshot cols: 1ts 2uptime 3load 4mem_kb 5temp_milli 6rss 7taint 8nr 9wdt 10wifi ... 21proc
+printf '%s\n' \
+  '100 10 0.20 250000 45000 1200 1 2 0 111 0 0 0 0 0 0 0 0 44 256 90' \
+  '105 15 0.30 248000 46000 1200 1 1 0 222 0 0 0 0 0 0 0 0 44 256 92' \
+  > "$SNAPSHOT_LOG"
+
+echo 'ts=3500 uptime=120.00 load=0.10 temp_milli=47000 wifi_irq=333 proc_count=95' > "$HEARTBEAT_FILE"
+
+publish_reboots 9999
+out=$(cat "$REBOOTS_OUT" 2>/dev/null)
+
+assert_contains "feed: generated ts"        '"generated":9999'                "$out"
+assert_contains "feed: FIRST_RUN boot"       '"verdict":"FIRST_RUN","gap":-1'  "$out"
+assert_contains "feed: CLEAN boot gap=6"     '"verdict":"CLEAN","gap":6'       "$out"
+assert_contains "feed: ABRUPT boot gap=240"  '"verdict":"ABRUPT","gap":240'    "$out"
+boot_count=$(echo "$out" | grep -o '"verdict"' | wc -l | tr -d ' ')
+assert_eq       "feed: lists all 3 boots"    "3"                               "$boot_count"
+assert_contains "feed: temp_c converted"     '"temp_c":[45.0,46.0]'            "$out"
+assert_contains "feed: mem_mb converted"     '"mem_mb":[244,242]'              "$out"
+assert_contains "feed: current heartbeat"    '"wifi_irq":333'                  "$out"
 
 ############################################################
 # Summary
