@@ -1,0 +1,22 @@
+[package]
+name = "dash_collector"
+version = "0.1.0"
+edition = "2021"
+description = "Native Rust reimplementation of the dashboard data collector (additive provider writing /www/data2.json)"
+
+[[bin]]
+name = "dash_collector"
+path = "src/main.rs"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+# preserve_order keeps object key order as the device emits it (e.g. the
+# clients map), so we never hand-roll a JSON key-order parser.
+serde_json = { version = "1", features = ["preserve_order"] }
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
