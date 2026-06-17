@@ -13,6 +13,9 @@ serde = { version = "1", features = ["derive"] }
 # preserve_order keeps object key order as the device emits it (e.g. the
 # clients map), so we never hand-roll a JSON key-order parser.
 serde_json = { version = "1", features = ["preserve_order"] }
+# SIGTERM/INT/HUP handling so a clean stop writes a shutdown record — that's
+# what lets the next boot tell an orderly reboot from an abrupt one.
+signal-hook = "0.3"
 
 [profile.release]
 opt-level = "z"

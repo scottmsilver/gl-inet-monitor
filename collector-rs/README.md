@@ -1,17 +1,14 @@
 # dash_collector (Rust) — additive native data provider
 
-A native Rust reimplementation of the `dash_daemon.sh` **data-collection hot path**
-(`/www/data.json`). Purely **additive** — built to run side-by-side and be
-validated against the shell daemon before any cutover:
+A native Rust reimplementation of `dash_daemon.sh` — the **full replacement**:
+both the live-metrics hot path (`/www/data.json`) **and** the reboot forensics
+(heartbeat, boot record, `reboots.json`, syslog tail). Runs under procd via
+`dash_collector.init`.
 
-- Writes **`/www/data2.json`** (never `/www/data.json`).
-- One state snapshot at `/tmp/dash2_state.json` (never collides with the shell daemon).
-- Deploys to **`/root/dash_collector`** (never touches `/root/dash_daemon.sh`).
-- Does **not** replicate the reboot forensics (heartbeat / boot log /
-  `reboots.json` / syslog tail) — that stays in shell.
-
-The shell daemon, `data.json`, `reboots.json`, dash2/dash3 and all existing
-files are left untouched.
+It can also run **additively** for validation: with `DASH2_JSON_OUT`,
+`DASH2_PERSIST_DIR` and `DASH2_REBOOTS_OUT` pointed at parallel paths it writes
+alongside the shell daemon without touching its files — which is how every part
+was validated side-by-side before cutover.
 
 ## Design — structured interfaces, no text scraping
 
@@ -45,6 +42,8 @@ src/io.rs        all outside-world I/O: ubus_call, std HTTP GET, TCP RTT + input
 src/classify.rs  ISP/ASN -> connection class + the field-editable ASN data file
 src/probes.rs    one function per metric (+ detect_uplink, name resolution)
 src/state.rs     rolling histories + carry-over, snapshotted to one file
+src/forensics.rs heartbeat/snapshot/boot-record/shutdown/syslog-tail + reboots.json
+dash_collector.init   procd service script (install as /etc/init.d/dash_collector)
 ```
 Each module carries `//!`/`///` doc comments (run `cargo doc --open`). Unit
 tests live beside the code they cover.

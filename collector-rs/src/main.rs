@@ -23,6 +23,7 @@
 //! - [`state`]    — rolling histories + carry-over, persisted to one file.
 
 mod classify;
+mod forensics;
 mod io;
 mod probes;
 mod schema;
@@ -39,6 +40,8 @@ pub(crate) const INTERVAL: u64 = 5;
 pub(crate) const MAX_HISTORY: usize = 120;
 /// Re-run uplink ISP/ASN detection at most every N cycles (unless forced).
 pub(crate) const UPLINK_DETECT_INTERVAL: u64 = 60;
+/// Republish reboots.json every N cycles (~30 s; boot history changes rarely).
+const REBOOTS_PUBLISH_INTERVAL: u64 = 6;
 
 const JSON_OUT_DEFAULT: &str = "/www/data2.json";
 
@@ -148,17 +151,53 @@ fn main() {
     let once = std::env::args().any(|a| a == "--once");
     let mut state = State::load();
     if once {
+        // One data.json cycle, no forensics loop — used for validation.
         collect_data(&mut state);
         return;
     }
+
+    // Graceful shutdown: catching SIGTERM/INT/HUP lets us write a shutdown
+    // record, which is how the next boot tells an orderly reboot from an abrupt
+    // one. The handler just sets a flag; the loop does the I/O.
+    let term = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    for sig in [
+        signal_hook::consts::SIGTERM,
+        signal_hook::consts::SIGINT,
+        signal_hook::consts::SIGHUP,
+    ] {
+        let _ = signal_hook::flag::register(sig, std::sync::Arc::clone(&term));
+    }
+
+    // Forensics startup: begin capturing syslog, record this boot (gap→verdict),
+    // and publish reboots.json once so dash3 isn't empty before the first tick.
+    forensics::start_syslog_tail();
+    forensics::record_boot(now_secs());
+    forensics::publish_reboots(now_secs());
+
     log(&format!(
         "Dashboard Rust collector starting (interval: {}s, history: {}) -> {}",
         INTERVAL,
         MAX_HISTORY,
         json_out()
     ));
+
+    let mut cycle: u64 = 0;
     loop {
         collect_data(&mut state);
-        std::thread::sleep(Duration::from_secs(INTERVAL));
+        cycle += 1;
+        forensics::record_heartbeat(now_secs(), cycle);
+        if cycle % REBOOTS_PUBLISH_INTERVAL == 0 {
+            forensics::publish_reboots(now_secs());
+        }
+        forensics::rotate_syslog_tail(cycle);
+
+        // Sleep the interval in 1 s steps so a stop signal is handled within ~1 s.
+        for _ in 0..INTERVAL {
+            if term.load(std::sync::atomic::Ordering::Relaxed) {
+                forensics::record_shutdown(now_secs(), "TERM");
+                std::process::exit(0);
+            }
+            std::thread::sleep(Duration::from_secs(1));
+        }
     }
 }
