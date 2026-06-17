@@ -410,13 +410,17 @@ EOF
 # Side effect: writes the JSON client-list (inner contents, no brackets)
 # to $CLIENTS_LIST_FILE. Empty file is valid (means no clients).
 probe_clients() {
-    local hints_age=9999
-    if [ -f "$LUCI_HINTS_CACHE" ]; then
-        local cache_mtime=$(stat -c %Y "$LUCI_HINTS_CACHE" 2>/dev/null || stat -f %m "$LUCI_HINTS_CACHE" 2>/dev/null || echo 0)
-        hints_age=$(($(date +%s) - cache_mtime))
-    fi
-    if [ $hints_age -gt $HINTS_CACHE_AGE ]; then
-        ubus -t 3 call luci-rpc getHostHints '{}' > "$LUCI_HINTS_CACHE" 2>/dev/null
+    # Refresh the luci-rpc host-hints cache at most every HINTS_CACHE_AGE
+    # seconds. Track the last refresh in a sidecar timestamp file rather than
+    # via stat(1) — the GL.iNet vendor firmware's busybox has no `stat` applet,
+    # which made the old mtime check always read "stale" and re-query ubus
+    # every cycle.
+    local now=$(date +%s) hints_ts=0
+    [ -f "$LUCI_HINTS_CACHE.ts" ] && read hints_ts < "$LUCI_HINTS_CACHE.ts" 2>/dev/null
+    case "$hints_ts" in ''|*[!0-9]*) hints_ts=0 ;; esac
+    if [ ! -f "$LUCI_HINTS_CACHE" ] || [ $((now - hints_ts)) -gt $HINTS_CACHE_AGE ]; then
+        ubus -t 3 call luci-rpc getHostHints '{}' > "$LUCI_HINTS_CACHE" 2>/dev/null && \
+            echo "$now" > "$LUCI_HINTS_CACHE.ts"
     fi
 
     local clients_raw=$(ubus -t 3 call gl-clients list '{}' 2>/dev/null)

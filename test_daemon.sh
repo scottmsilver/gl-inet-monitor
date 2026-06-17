@@ -740,11 +740,14 @@ section "probe_clients direction (mocked ubus + jsonfilter)"
 # so tx = download.
 DHCP_LEASES="$SANDBOX/dhcp.leases"; : > "$DHCP_LEASES"
 MOCK_CLIENT_MAC="AA:BB:CC:DD:EE:FF"
+LUCI_CALL_LOG="$SANDBOX/luci_calls"; : > "$LUCI_CALL_LOG"
 
+# Log each luci-rpc getHostHints call to a file (a counter var wouldn't survive
+# the command-substitution subshell that runs probe_clients).
 ubus() {
     case "$*" in
         *"gl-clients list"*)      echo '{"clients":{"present":1}}' ;;  # non-empty; parsed by mocked jsonfilter
-        *"luci-rpc getHostHints"*) echo '{}' ;;
+        *"luci-rpc getHostHints"*) echo x >> "$LUCI_CALL_LOG"; echo '{}' ;;
         *)                         echo "" ;;
     esac
 }
@@ -777,8 +780,16 @@ client_list=$(cat "$CLIENTS_LIST_FILE" 2>/dev/null)
 assert_contains "clients list: tx=download"     '"tx":8000' "$client_list"
 assert_contains "clients list: rx=upload"       '"rx":400'  "$client_list"
 
+# Host-hints cache is stat-free (vendor busybox has no `stat`): two calls
+# within HINTS_CACHE_AGE must fetch hints only once.
+rm -f "$LUCI_HINTS_CACHE" "$LUCI_HINTS_CACHE.ts"; : > "$LUCI_CALL_LOG"
+probe_clients > /dev/null   # cold: should fetch + stamp
+probe_clients > /dev/null   # warm: should use cache
+calls=$(grep -c x "$LUCI_CALL_LOG" 2>/dev/null)
+assert_eq "luci hints cached: 1 fetch over 2 calls" "1" "$calls"
+
 unset -f ubus jsonfilter
-unset MOCK_CLIENT_MAC
+unset MOCK_CLIENT_MAC LUCI_CALL_LOG
 
 ############################################################
 section "publish_reboots (boot history + telemetry feed)"
