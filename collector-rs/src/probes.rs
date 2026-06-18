@@ -38,9 +38,11 @@ pub(crate) fn probe_web(now: i64) -> (i64, i64) {
     }
 }
 
-/// Latency as a TCP connect-time RTT (no ICMP / `ping`). `None` on failure.
+/// Latency as a real ICMP echo RTT (our own raw-socket impl — no `ping` binary,
+/// no text scraping). ICMP reflects the true path latency and can't be faked low
+/// by a transparent TCP proxy the way a TCP connect can. `None` on failure.
 pub(crate) fn probe_ping() -> Option<f64> {
-    io::tcp_connect_rtt_ms("www.google.com", 443, Duration::from_secs(2))
+    io::icmp_rtt_ms("www.google.com", Duration::from_secs(2))
 }
 
 /// Throughput in kbps from GL's offload-aware `gl-clients get_speed`

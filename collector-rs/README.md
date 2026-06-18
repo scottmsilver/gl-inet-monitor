@@ -20,9 +20,11 @@ Brittleness comes from parsing unstructured CLI text. This collector avoids it:
   `generate_204` reachability check and the ip-api ISP/ASN lookup. Both endpoints
   are plain HTTP; `ip-api.com` with no IP returns the requester's own IP + ISP,
   so one call covers external-IP + classification.
-- **TCP connect-time RTT** (`TcpStream::connect_timeout` + `Instant`) for latency,
-  in place of ICMP/`ping`. TCP reaches where ICMP is often dropped
-  (captive/airplane/satellite), so it's both dependency-free and a better signal.
+- **Real ICMP echo RTT** for latency — our own raw-socket implementation via
+  `libc` (no `ping` binary, no text scraping). An earlier TCP-connect approach
+  was abandoned because transparent proxies on captive/resort wifi answer the
+  handshake *locally* and faked the RTT low (~3 ms over a real ~750 ms link);
+  ICMP can't be short-circuited that way, so it reports true path latency.
 - **No `json_escape`** — serde escapes strings on serialize.
 - **One `run → parse → Option<T> → sentinel` pipeline**; any external-call
   surprise (spawn fail, non-zero exit, malformed JSON, connect fail) degrades to
@@ -38,7 +40,7 @@ is no `libgl-clients`, so this is unavoidable). Everything else is std + kernel
 ```
 src/main.rs      crate docs, config, the collect_data orchestrator, main loop
 src/schema.rs    output document types (DataDoc + sections) — pure data, no logic
-src/io.rs        all outside-world I/O: ubus_call, std HTTP GET, TCP RTT + input contracts
+src/io.rs        all outside-world I/O: ubus_call, std HTTP GET, ICMP RTT + input contracts
 src/classify.rs  ISP/ASN -> connection class + the field-editable ASN data file
 src/probes.rs    one function per metric (+ detect_uplink, name resolution)
 src/state.rs     rolling histories + carry-over, snapshotted to one file
@@ -120,7 +122,7 @@ connection_type, isp, thresholds, web.code, avail, throughput.source,
 clients.online, and per-client mac/name/ip/iface). Time-varying fields (ts,
 web.ms, latency, throughput, histories) are correct in kind and track within the
 sampling gap — including throughput via the offload-aware `gl-clients` source.
-`cargo test` 13/13. Note `ping.current` is now TCP-connect latency, not ICMP
+`cargo test` 13/13. Note `ping.current` is a real ICMP RTT (own raw-socket impl), not the `ping` binary
 (intentional — see Design).
 
 ## SoC reset-cause tracing (devmem)

@@ -6,6 +6,7 @@ version = 4
 name = "dash_collector"
 version = "0.1.0"
 dependencies = [
+ "libc",
  "serde",
  "serde_json",
  "signal-hook",

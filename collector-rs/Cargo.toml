@@ -16,6 +16,9 @@ serde_json = { version = "1", features = ["preserve_order"] }
 # SIGTERM/INT/HUP handling so a clean stop writes a shutdown record — that's
 # what lets the next boot tell an orderly reboot from an abrupt one.
 signal-hook = "0.3"
+# Raw ICMP socket for a real path-RTT latency probe (no `ping` binary, no text
+# scraping). Already in the tree via signal-hook; declared directly for the FFI.
+libc = "0.2"
 
 [profile.release]
 opt-level = "z"
