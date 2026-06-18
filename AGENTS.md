@@ -52,8 +52,6 @@ dash3.html (browser) → fetches /reboots.json → reboot history + telemetry
 | `dash3.html` | `/www/dash3.html` | Reboot-forensics UI |
 | (on device only) | `/root/dash_net_persist.sh` | Re-asserts tailscale DNS/routes + dnsmasq/firewall after reboot (boot hook + 5-min cron) |
 
-`dash.html`/`debug.html` are the original v1 dashboards, kept for reference.
-
 ## Deployment
 
 ```bash
