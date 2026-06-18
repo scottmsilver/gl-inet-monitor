@@ -225,18 +225,21 @@ ubi_max_ec={} entropy={} proc_count={}\n",
     }
 }
 
-/// Seconds since the last heartbeat, or -1 if there is none.
-fn heartbeat_gap(now: i64) -> i64 {
-    let content = read_trim(&heartbeat_file());
-    for line in content.lines() {
+/// Seconds since the last heartbeat. `None` only when there is genuinely no
+/// prior heartbeat (a true first run). A negative value is possible when the
+/// clock hasn't NTP-synced yet at early boot (the heartbeat's timestamp looks
+/// "in the future" vs the unsynced wall clock) — that's still a reboot, not a
+/// first run, so callers must distinguish `None` from `Some(negative)`.
+fn heartbeat_gap(now: i64) -> Option<i64> {
+    for line in read_trim(&heartbeat_file()).lines() {
         if let Some(rest) = line.strip_prefix("ts=") {
             let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
             if let Ok(last) = digits.parse::<i64>() {
-                return now - last;
+                return Some(now - last);
             }
         }
     }
-    -1
+    None
 }
 
 /// Write a shutdown record from the signal handler path, then `sync`. A recent
@@ -286,12 +289,17 @@ pub(crate) fn rotate_syslog_tail(cycle: u64) {
 pub(crate) fn record_boot(now: i64) {
     let _ = fs::create_dir_all(persist_dir());
     let gap = heartbeat_gap(now);
-    let verdict = if gap < 0 {
-        "FIRST_RUN (no previous heartbeat)".to_string()
-    } else if gap <= 90 {
-        format!("CLEAN (gap={}s — within heartbeat interval)", gap)
-    } else {
-        format!("ABRUPT (gap={}s — exceeds 90s; system died without warning)", gap)
+    let verdict = match gap {
+        None => "FIRST_RUN (no previous heartbeat)".to_string(),
+        // A prior heartbeat exists ⇒ this is a reboot, never a first run. A
+        // negative gap means the clock wasn't NTP-synced at boot, so downtime
+        // is indeterminate — but it's still a reboot, so flag it abrupt rather
+        // than mislabel it FIRST_RUN.
+        Some(g) if g < 0 => {
+            format!("ABRUPT (downtime indeterminate — clock unsynced at boot; raw {}s)", g)
+        }
+        Some(g) if g <= 90 => format!("CLEAN (gap={}s — within heartbeat interval)", g),
+        Some(g) => format!("ABRUPT (gap={}s — exceeds 90s; system died without warning)", g),
     };
 
     let mut out = String::new();
@@ -299,7 +307,7 @@ pub(crate) fn record_boot(now: i64) {
     out.push('\n');
     out.push_str(&format!("==================== BOOT {} ====================\n", date_string()));
     out.push_str(&format!("ts={} uptime_now={} verdict: {}\n", now, first_field("/proc/uptime"), verdict));
-    if gap >= 0 {
+    if gap.is_some() {
         out.push_str("last heartbeat raw:\n");
         out.push_str(&indent(&read_trim(&heartbeat_file())));
     }
@@ -338,6 +346,17 @@ pub(crate) fn record_boot(now: i64) {
         read_trim("/sys/class/watchdog/watchdog0/bootstatus"),
         read_trim("/sys/class/watchdog/watchdog0/timeout")
     ));
+    // Low-level SoC reset-cause registers via the static `devmem` tool (no
+    // STRICT_DEVMEM on this kernel). 0x1001c000 = WDT/TOPRGU block; the word at
+    // +0x0c (WDT_STATUS) encodes the FULL last-reset cause, beyond the single
+    // bit `bootstatus` exposes. Captured every boot so a future reset that DOES
+    // set a cause bit is recorded. (devmem must be installed at /root/devmem.)
+    out.push_str("  SoC reset registers (devmem 0x1001c000; +0x0c=WDT_STATUS reset-cause):\n");
+    if let Ok(o) = Command::new("/root/devmem").args(["0x1001c000", "16"]).output() {
+        out.push_str(&String::from_utf8_lossy(&o.stdout).lines().map(|l| format!("    {}\n", l)).collect::<String>());
+    }
+    out.push_str("  mtketh reset events (FE faults / warm-cold counts):\n");
+    out.push_str(&read_trim("/proc/mtketh/reset_event").lines().map(|l| format!("    {}\n", l)).collect::<String>());
     let dmesg = Command::new("dmesg").output().map(|o| String::from_utf8_lossy(&o.stdout).to_string()).unwrap_or_default();
     out.push_str("--- dmesg first 50 lines ---\n");
     out.push_str(&dmesg.lines().take(50).map(|l| format!("  {}\n", l)).collect::<String>());
@@ -565,14 +584,20 @@ ts=3000 uptime_now=55.00 verdict: ABRUPT (gap=240s — exceeds 90s)";
 
     #[test]
     fn gap_verdict_boundaries() {
-        // pure boundary logic mirror (heartbeat_gap reads a file, so test the rule)
-        let verdict = |gap: i64| {
-            if gap < 0 { "FIRST_RUN" } else if gap <= 90 { "CLEAN" } else { "ABRUPT" }
+        // Mirrors record_boot's match: None = genuine first run; a prior
+        // heartbeat (Some) is always a reboot — a negative gap (clock unsynced
+        // at boot) is ABRUPT, NOT FIRST_RUN (the old bug).
+        let verdict = |gap: Option<i64>| match gap {
+            None => "FIRST_RUN",
+            Some(g) if g < 0 => "ABRUPT",
+            Some(g) if g <= 90 => "CLEAN",
+            Some(_) => "ABRUPT",
         };
-        assert_eq!(verdict(-1), "FIRST_RUN");
-        assert_eq!(verdict(6), "CLEAN");
-        assert_eq!(verdict(90), "CLEAN");
-        assert_eq!(verdict(91), "ABRUPT");
-        assert_eq!(verdict(240), "ABRUPT");
+        assert_eq!(verdict(None), "FIRST_RUN");
+        assert_eq!(verdict(Some(-5)), "ABRUPT"); // clock unsynced, still a reboot
+        assert_eq!(verdict(Some(6)), "CLEAN");
+        assert_eq!(verdict(Some(90)), "CLEAN");
+        assert_eq!(verdict(Some(91)), "ABRUPT");
+        assert_eq!(verdict(Some(240)), "ABRUPT");
     }
 }

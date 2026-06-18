@@ -122,3 +122,14 @@ web.ms, latency, throughput, histories) are correct in kind and track within the
 sampling gap — including throughput via the offload-aware `gl-clients` source.
 `cargo test` 13/13. Note `ping.current` is now TCP-connect latency, not ICMP
 (intentional — see Design).
+
+## SoC reset-cause tracing (devmem)
+
+`tools/devmem.c` is a tiny static MMIO reader (build: `zig cc -target
+aarch64-linux-musl -Os -static tools/devmem.c -o devmem`, install at
+`/root/devmem`). The boot record reads the MT7981 WDT/TOPRGU block
+(`0x1001c000`, incl. `WDT_STATUS` at +0x0c — the full last-reset cause, beyond
+the single bit `bootstatus` exposes) plus `/proc/mtketh/reset_event` every boot.
+Observed so far: `WDT_STATUS=0` and no eth-fault resets — i.e. resets leave no
+in-SoC cause, consistent with an external/power event. Needs `/dev/mem`
+(present; `CONFIG_STRICT_DEVMEM` is off on this kernel).
