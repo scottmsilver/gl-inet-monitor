@@ -4,102 +4,101 @@ Context for AI agents working on this project.
 
 ## Project Overview
 
-This is a network monitoring dashboard for a GL.iNet Beryl AX (MT3000) router running in repeater mode. It collects metrics every 5 seconds and displays them in a browser-based dashboard.
+A network monitoring dashboard for a GL.iNet Beryl AX (MT3000) travel router in
+repeater mode. A daemon collects metrics every 5 s and writes JSON that
+browser dashboards render.
 
-**Firmware:** GL.iNet vendor OpenWrt 4.8.1 (kernel 5.4.211, MediaTek SDK driver). Switched from vanilla OpenWrt 24.10.4 because the upstream `mt7915e` driver caused random reboots (OpenWrt issue #18285). The vendor build uses MediaTek interface names and the proprietary driver — see notes below; some tooling differs from vanilla.
+**Firmware:** GL.iNet vendor OpenWrt 4.8.1 (kernel 5.4.211, MediaTek SDK driver).
+Switched from vanilla OpenWrt 24.10.4 because the upstream `mt7915e` driver
+caused random reboots (OpenWrt issue #18285). The vendor build uses MediaTek
+interface names and the proprietary driver. (Note: the reboots still recur
+intermittently and appear to be hardware/power-class — no in-SoC cause recorded.)
 
 ## Router Access
 
 ```bash
-ssh -i ~/.ssh/beryl_ax root@192.168.8.1
+ssh -i ~/.ssh/beryl_ax root@192.168.8.1   # always this key; router at 192.168.8.1
 ```
 
-Always use this SSH key. The router is at 192.168.8.1.
+## Architecture
+
+The data collector is **`collector-rs/`** — a native Rust daemon (full
+replacement of the old shell `dash_daemon.sh`, which is retired; see git history
+if ever needed). It owns both the live metrics **and** the reboot forensics. The
+detailed design lives in **`collector-rs/README.md`** — read it first.
+
+```
+dash_collector (Rust, runs every 5s, procd service)
+    ├── std HTTP GET google /generate_204   → web reachability + latency
+    ├── raw-socket ICMP echo                → ping RTT (own impl; no `ping` binary)
+    ├── ubus call gl-clients get_speed      → throughput (offload-aware)
+    ├── ubus call gl-clients list           → per-client tx/rx
+    ├── ubus call iwinfo info               → uplink SSID
+    ├── /dev/mem + /proc + dmesg/pstore     → reboot forensics
+    ├── writes /www/data.json               → live dashboard
+    └── writes /www/reboots.json + /overlay/upper/root/dash_* → forensics
+
+dash2.html (browser) → fetches /data.json   → live graphs
+dash3.html (browser) → fetches /reboots.json → reboot history + telemetry
+```
 
 ## File Locations
 
 | Local | Router | Purpose |
 |-------|--------|---------|
-| `dash.html` | `/www/dash.html` | Dashboard UI |
-| `dash_daemon.sh` | `/root/dash_daemon.sh` | Data collector (runs continuously) |
-| `dash_init.sh` | `/etc/init.d/dash_daemon` | procd service script |
+| `collector-rs/` (→ `dash_collector` binary) | `/root/dash_collector` | Data collector + forensics |
+| `collector-rs/dash_collector.init` | `/etc/init.d/dash_collector` | procd service |
+| `dash2.html` | `/www/dash2.html` | Live dashboard UI |
+| `dash3.html` | `/www/dash3.html` | Reboot-forensics UI |
+| (on device only) | `/root/dash_net_persist.sh` | Re-asserts tailscale DNS/routes + dnsmasq/firewall after reboot (boot hook + 5-min cron) |
 
-## Deployment Commands
+`dash.html`/`debug.html` are the original v1 dashboards, kept for reference.
+
+## Deployment
 
 ```bash
-# Deploy dashboard
-cat dash.html | ssh -i ~/.ssh/beryl_ax root@192.168.8.1 "cat > /www/dash.html"
+# Collector: build static aarch64-musl, then pipe over ssh (no scp on device)
+cd collector-rs && cargo zigbuild --release --target aarch64-unknown-linux-musl
+ssh -i ~/.ssh/beryl_ax root@192.168.8.1 '/etc/init.d/dash_collector stop; killall dash_collector 2>/dev/null'
+cat target/aarch64-unknown-linux-musl/release/dash_collector \
+  | ssh -i ~/.ssh/beryl_ax root@192.168.8.1 'cat > /root/dash_collector && chmod +x /root/dash_collector && /etc/init.d/dash_collector start'
 
-# Deploy daemon and restart
-cat dash_daemon.sh | ssh -i ~/.ssh/beryl_ax root@192.168.8.1 "cat > /root/dash_daemon.sh && chmod +x /root/dash_daemon.sh"
-ssh -i ~/.ssh/beryl_ax root@192.168.8.1 "killall dash_daemon.sh 2>/dev/null; /etc/init.d/dash_daemon start"
+# Dashboard
+cat dash2.html | ssh -i ~/.ssh/beryl_ax root@192.168.8.1 'cat > /www/dash2.html'
 ```
+(Can't overwrite the running binary — stop it first, hence the `killall`.)
 
 ## Key Technical Constraints
 
-1. **Shell is busybox ash** - No bash features like `<<<`, arrays, or `[[`. Use POSIX sh.
-
-2. **No sftp-server** - Use `cat file | ssh ... "cat > dest"` instead of scp.
-
-3. **Hardware flow offload (WED)** - Standard Linux counters (`/proc/net/dev`) MISS offloaded traffic: the uplink RX counter reads 0 during a multi-Mbps download. For throughput, use GL's own per-client accounting: `ubus call gl-clients get_speed` (returns `speed_rx`=download, `speed_tx`=upload, bytes/sec). On vanilla OpenWrt the equivalent was `iw dev wlanX station dump` (the `iw` binary is absent on vendor firmware). `probe_throughput` falls back to `/proc/net/dev` only when `gl-clients` is unavailable.
-
-4. **Storage** - `/tmp` is RAM-based tmpfs; cap live history at 120 samples there. Persistent reboot-forensic logs (heartbeat, boot record, snapshots) intentionally write to `/overlay/upper/root` (UBIFS flash) so they survive a reboot — writes are tiny and rate-limited to stay well under flash wear limits.
-
-5. **procd for services** - OpenWrt uses procd, not systemd. See `dash_init.sh` for format.
-
-## Architecture
-
-```
-dash_daemon.sh (runs every 5s)
-    │
-    ├── curl google.com/generate_204    → web verify latency
-    ├── ping www.google.com             → ping latency (anycast IPs blocked on some networks)
-    ├── ubus call gl-clients get_speed  → throughput (offload-aware)
-    ├── iwinfo apclix0/apcli0 info      → uplink SSID (vendor names; sta0/sta1 on vanilla)
-    ├── ubus call gl-clients list       → per-client tx/rx
-    └── writes /www/data.json (+ reboot forensics to /overlay/upper/root)
-
-dash.html (browser)
-    │
-    └── fetches /data.json every 5s → renders graphs
-```
+1. **busybox ash** — POSIX sh only (no `<<<`, arrays, `[[`).
+2. **No sftp/scp** — use `cat file | ssh … 'cat > dest'`.
+3. **Hardware flow offload (WED)** — `/proc/net/dev` counters MISS offloaded
+   traffic (uplink RX reads 0 during a multi-Mbps download). Use
+   `ubus call gl-clients get_speed` (`speed_rx`=download, `speed_tx`=upload, B/s).
+4. **Transparent proxy on captive/resort wifi** — fakes TCP-connect latency low
+   (~3 ms over a real ~750 ms link). Measure latency with ICMP, not TCP connect.
+5. **Storage** — `/tmp` is tmpfs (cap history ~120 samples). Forensic logs write
+   to `/overlay/upper/root` (== `/root` via overlayfs; UBIFS flash, survives reboot).
+6. **procd** for services (not systemd). `/dev/mem` is usable (no `STRICT_DEVMEM`).
+7. **Only external CLI the collector uses is `ubus`** — everything else is std +
+   kernel (sockets, `/proc`, `/dev/mem` via libc).
 
 ## Common Tasks
 
-### Add a new metric
-
-1. Add collection logic in `dash_daemon.sh` `collect_data()` function
-2. Add to JSON output in the heredoc
-3. Add HTML elements in `dash.html`
-4. Add JS processing in `fetchData()` function
-5. Add graph drawing if needed
-
-### Debug data collection
-
-```bash
-ssh -i ~/.ssh/beryl_ax root@192.168.8.1 "cat /www/data.json"
-ssh -i ~/.ssh/beryl_ax root@192.168.8.1 "ps | grep dash"
-ssh -i ~/.ssh/beryl_ax root@192.168.8.1 "logread | grep dash | tail -20"
-```
-
-### Check WiFi interfaces
-
-```bash
-ssh -i ~/.ssh/beryl_ax root@192.168.8.1 "iwinfo"
-# Vendor firmware (current): apclix0/apcli0 = uplink (5G/2.4G repeater client),
-#                            rax0/rax1/ra0/ra1 = local AP
-# Vanilla OpenWrt:           sta0/sta1 = uplink, wlan0/wlan1 = local AP
-```
-
-## Code Style
-
-- **Shell**: POSIX sh, no bashisms, use awk for math
-- **HTML/JS**: Vanilla JS, no frameworks, inline styles/script
-- **Keep it minimal**: Router has limited resources
+- **Add a metric:** add a field to the schema struct in `collector-rs/src/schema.rs`,
+  a `probe_*` in `src/probes.rs`, wire it in `collect_data` (`src/main.rs`), then
+  render it in `dash2.html`. `cargo test` + cross-compile + deploy.
+- **Debug:** `ssh … 'logread | grep dash_collector | tail'`, `cat /www/data.json`,
+  `cat /www/reboots.json`, boot records in `/root/dash_boot.log`.
+- **WiFi interfaces:** `ssh … iwinfo` — vendor: `apclix0`/`apcli0` = uplink (5G/2.4G
+  client), `rax0`/`rax1`/`ra0`/`ra1` = local AP. Vanilla: `sta0`/`sta1`, `wlan0`/`wlan1`.
+- **Tailscale DNS/routing:** the Beryl forwards tailnet + home split-DNS domains
+  to MagicDNS/the home firewall via dnsmasq, and masquerades LAN→tailnet. These
+  reset on reboot (GL re-runs `tailscale up`); `dash_net_persist.sh` re-asserts them.
 
 ## Gotchas
 
-- Browser caches aggressively - use Cmd+Shift+R to refresh
-- Old daemon may keep running - always `killall dash_daemon.sh` before restart
-- JSON syntax errors crash the dashboard - validate output manually if issues
-- The `iw` rx/tx are from the AP's perspective (rx = upload from client)
+- Browser caches aggressively — Cmd+Shift+R.
+- Can't overwrite a running binary (`Text file busy`) — stop the service first.
+- Reboots wipe `/tmp` and reset Tailscale prefs; persistent config lives in uci +
+  `/overlay`, and `dash_net_persist.sh` restores the Tailscale bits.
