@@ -50,7 +50,8 @@ dash3.html (browser) → fetches /reboots.json → reboot history + telemetry
 | `collector-rs/dash_collector.init` | `/etc/init.d/dash_collector` | procd service |
 | `dash2.html` | `/www/dash2.html` | Live dashboard UI |
 | `dash3.html` | `/www/dash3.html` | Reboot-forensics UI |
-| (on device only) | `/root/dash_net_persist.sh` | Re-asserts tailscale DNS/routes + dnsmasq/firewall after reboot (boot hook + 5-min cron) |
+| `device/dash_net_persist.sh` | `/root/dash_net_persist.sh` | Self-heal hook (boot + 5-min cron): tailscale DNS/routes, dnsmasq/firewall, home-page link |
+| `device/dash_link.html` | `/root/dash_link.html` | Floating "📊 Dashboard" link injected into GL's `gl_home.html` |
 
 ## Deployment
 
