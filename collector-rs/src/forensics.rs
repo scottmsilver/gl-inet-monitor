@@ -346,14 +346,17 @@ pub(crate) fn record_boot(now: i64) {
         read_trim("/sys/class/watchdog/watchdog0/bootstatus"),
         read_trim("/sys/class/watchdog/watchdog0/timeout")
     ));
-    // Low-level SoC reset-cause registers via the static `devmem` tool (no
+    // Low-level SoC reset-cause registers, read natively from /dev/mem (no
     // STRICT_DEVMEM on this kernel). 0x1001c000 = WDT/TOPRGU block; the word at
     // +0x0c (WDT_STATUS) encodes the FULL last-reset cause, beyond the single
     // bit `bootstatus` exposes. Captured every boot so a future reset that DOES
-    // set a cause bit is recorded. (devmem must be installed at /root/devmem.)
-    out.push_str("  SoC reset registers (devmem 0x1001c000; +0x0c=WDT_STATUS reset-cause):\n");
-    if let Ok(o) = Command::new("/root/devmem").args(["0x1001c000", "16"]).output() {
-        out.push_str(&String::from_utf8_lossy(&o.stdout).lines().map(|l| format!("    {}\n", l)).collect::<String>());
+    // set a cause bit is recorded.
+    out.push_str("  SoC reset registers (/dev/mem 0x1001c000; +0x0c=WDT_STATUS reset-cause):\n");
+    const RGU_BASE: u64 = 0x1001c000;
+    if let Some(words) = crate::io::read_mmio(RGU_BASE, 16) {
+        for (i, w) in words.iter().enumerate() {
+            out.push_str(&format!("    0x{:08x}: 0x{:08x}\n", RGU_BASE + (i as u64) * 4, w));
+        }
     }
     out.push_str("  mtketh reset events (FE faults / warm-cold counts):\n");
     out.push_str(&read_trim("/proc/mtketh/reset_event").lines().map(|l| format!("    {}\n", l)).collect::<String>());

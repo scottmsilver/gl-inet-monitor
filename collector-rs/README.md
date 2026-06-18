@@ -125,13 +125,13 @@ sampling gap — including throughput via the offload-aware `gl-clients` source.
 `cargo test` 13/13. Note `ping.current` is a real ICMP RTT (own raw-socket impl), not the `ping` binary
 (intentional — see Design).
 
-## SoC reset-cause tracing (devmem)
+## SoC reset-cause tracing
 
-`tools/devmem.c` is a tiny static MMIO reader (build: `zig cc -target
-aarch64-linux-musl -Os -static tools/devmem.c -o devmem`, install at
-`/root/devmem`). The boot record reads the MT7981 WDT/TOPRGU block
-(`0x1001c000`, incl. `WDT_STATUS` at +0x0c — the full last-reset cause, beyond
-the single bit `bootstatus` exposes) plus `/proc/mtketh/reset_event` every boot.
-Observed so far: `WDT_STATUS=0` and no eth-fault resets — i.e. resets leave no
-in-SoC cause, consistent with an external/power event. Needs `/dev/mem`
-(present; `CONFIG_STRICT_DEVMEM` is off on this kernel).
+Every boot record reads the MT7981 WDT/TOPRGU block (`0x1001c000`, incl.
+`WDT_STATUS` at +0x0c — the full last-reset cause, beyond the single bit
+`bootstatus` exposes) plus `/proc/mtketh/reset_event`. The register read is done
+**natively in Rust** (`io::read_mmio` — `libc` mmap of `/dev/mem`; no external
+tool), so the collector is a single self-contained binary. Needs root +
+`CONFIG_STRICT_DEVMEM` off (both true on this device). Observed so far:
+`WDT_STATUS=0` and no eth-fault resets — resets leave no in-SoC cause,
+consistent with an external/power event.

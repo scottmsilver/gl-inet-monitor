@@ -156,10 +156,11 @@ pub(crate) fn icmp_rtt_ms(host: &str, timeout: Duration) -> Option<f64> {
         if fd < 0 {
             return None;
         }
-        let tv = libc::timeval {
-            tv_sec: timeout.as_secs() as libc::time_t,
-            tv_usec: timeout.subsec_micros() as libc::suseconds_t,
-        };
+        // `as _` infers each field's type (avoids naming libc::time_t /
+        // suseconds_t, which musl is migrating to 64-bit).
+        let mut tv: libc::timeval = std::mem::zeroed();
+        tv.tv_sec = timeout.as_secs() as _;
+        tv.tv_usec = timeout.subsec_micros() as _;
         libc::setsockopt(
             fd,
             libc::SOL_SOCKET,
@@ -210,6 +211,33 @@ pub(crate) fn icmp_rtt_ms(host: &str, timeout: Duration) -> Option<f64> {
         };
         libc::close(fd);
         result
+    }
+}
+
+/// Read `count` 32-bit words of physical memory starting at `addr` via
+/// `/dev/mem` (mmap the containing page, volatile-read). Used to peek SoC
+/// registers like the MT7981 reset-cause block. `None` if `/dev/mem` is
+/// unreadable or mmap fails. Needs root + `CONFIG_STRICT_DEVMEM` off.
+pub(crate) fn read_mmio(addr: u64, count: usize) -> Option<Vec<u32>> {
+    unsafe {
+        let fd = libc::open(b"/dev/mem\0".as_ptr() as *const libc::c_char, libc::O_RDONLY | libc::O_SYNC);
+        if fd < 0 {
+            return None;
+        }
+        let ps = libc::sysconf(libc::_SC_PAGESIZE) as u64;
+        let base = addr & !(ps - 1);
+        let off = (addr - base) as usize;
+        let len = off + count * 4;
+        let m = libc::mmap(std::ptr::null_mut(), len, libc::PROT_READ, libc::MAP_SHARED, fd, base as libc::off_t);
+        if m == libc::MAP_FAILED {
+            libc::close(fd);
+            return None;
+        }
+        let p = (m as *const u8).add(off) as *const u32;
+        let words = (0..count).map(|i| std::ptr::read_volatile(p.add(i))).collect();
+        libc::munmap(m, len);
+        libc::close(fd);
+        Some(words)
     }
 }
 
